@@ -18,12 +18,12 @@ import (
 // Focus identifies the pane that receives keyboard input.
 type Focus int
 
-// Panes in focus-cycle order: Spaces -> Tasks -> Inspector -> Chat.
+// Panes in focus-cycle order: Spaces -> Tasks -> Chat -> Inspector.
 const (
 	FocusSpaces Focus = iota
 	FocusTasks
-	FocusInspector
 	FocusChat
+	FocusInspector
 	focusCount
 )
 
@@ -33,10 +33,10 @@ func (f Focus) String() string {
 		return "spaces"
 	case FocusTasks:
 		return "tasks"
-	case FocusInspector:
-		return "inspector"
 	case FocusChat:
 		return "chat"
+	case FocusInspector:
+		return "inspector"
 	}
 	return "unknown"
 }
@@ -62,7 +62,7 @@ type Options struct {
 }
 
 type keyMap struct {
-	Focus, FocusBack, Delegate, New, Approve, Review, Worktree, Lead, View,
+	Focus, FocusBack, FocusSpaces, FocusTasks, FocusChat, FocusInspector, Delegate, New, Approve, Review, Worktree, View,
 	Help, Quit, Up, Down, Left, Right, Send, Newline, Back key.Binding
 }
 
@@ -71,24 +71,27 @@ func newKeyMap() keyMap {
 		return key.NewBinding(key.WithKeys(strings.Split(keys, ",")...), key.WithHelp(k, desc))
 	}
 	return keyMap{
-		Focus:     b("tab", "tab", "next pane"),
-		FocusBack: b("shift+tab", "shift+tab", "prev pane"),
-		Delegate:  b("d", "d", "delegate"),
-		New:       b("n", "n", "new task"),
-		Approve:   b("a", "a", "approve/merge"),
-		Review:    b("r", "r", "review"),
-		Worktree:  b("w", "w", "worktree"),
-		Lead:      b("l", "l", "lead chat"),
-		View:      b("v", "v", "lanes/backlog"),
-		Help:      b("?", "?", "help"),
-		Quit:      b("q", "q", "quit"),
-		Up:        b("up,k", "↑/k", "up"),
-		Down:      b("down,j", "↓/j", "down"),
-		Left:      b("left,h", "←/→", "lane/tab"),
-		Right:     b("right", "→", "lane/tab"),
-		Send:      b("enter", "enter", "send"),
-		Newline:   b("ctrl+j", "ctrl+j", "newline"),
-		Back:      b("esc", "esc", "back"),
+		Focus:          b("tab", "tab", "next pane"),
+		FocusBack:      b("shift+tab", "shift+tab", "prev pane"),
+		FocusSpaces:    b("1", "1", "spaces"),
+		FocusTasks:     b("2", "2", "tasks"),
+		FocusChat:      b("3,l", "3/l", "agent window"),
+		FocusInspector: b("4", "4", "inspector"),
+		Delegate:       b("d", "d", "delegate"),
+		New:            b("n", "n", "new task"),
+		Approve:        b("a", "a", "approve/merge"),
+		Review:         b("r", "r", "review"),
+		Worktree:       b("w", "w", "worktree"),
+		View:           b("v", "v", "lanes/backlog"),
+		Help:           b("?", "?", "help"),
+		Quit:           b("q", "q", "quit"),
+		Up:             b("up,k", "↑/k", "up"),
+		Down:           b("down,j", "↓/j", "down"),
+		Left:           b("left,h", "←/→", "lane/tab"),
+		Right:          b("right", "→", "lane/tab"),
+		Send:           b("enter", "enter", "send"),
+		Newline:        b("ctrl+j", "ctrl+j", "newline"),
+		Back:           b("esc", "esc", "back"),
 	}
 }
 
@@ -245,10 +248,13 @@ func (m *Model) startRefresh() tea.Cmd {
 
 // ---- sizing ----
 
+// layout describes the three-column body: spaces over tasks on the left, the
+// agent conversation over the full height in the middle, the inspector over
+// the full height on the right.
 type layout struct {
-	compact                 bool
-	spacesW, centerW, inspW int
-	tasksH, chatH, bodyH    int
+	compact                bool
+	leftW, centerW, inspW  int
+	spacesH, tasksH, bodyH int
 }
 
 func (m Model) layout() layout {
@@ -257,11 +263,11 @@ func (m Model) layout() layout {
 		l.compact = true
 		return l
 	}
-	l.spacesW = clamp(m.width/5, 26, 34)
-	l.inspW = clamp(m.width*30/100, 34, 60)
-	l.centerW = m.width - l.spacesW - l.inspW
-	l.chatH = clamp(l.bodyH*2/5, 7, l.bodyH-7)
-	l.tasksH = l.bodyH - l.chatH
+	l.leftW = clamp(m.width*27/100, 27, 48)
+	l.inspW = clamp(m.width*27/100, 27, 56)
+	l.centerW = m.width - l.leftW - l.inspW
+	l.spacesH = clamp(l.bodyH/3, 7, min(10, l.bodyH-7)) // two spaces fit at 10
+	l.tasksH = l.bodyH - l.spacesH
 	return l
 }
 
@@ -277,10 +283,10 @@ func (m Model) resize() {
 		m.chat.SetSize(w, h)
 		return
 	}
-	m.spaces.SetSize(in(l.spacesW, l.bodyH))
-	m.tasks.SetSize(in(l.centerW, l.tasksH))
+	m.spaces.SetSize(in(l.leftW, l.spacesH))
+	m.tasks.SetSize(in(l.leftW, l.tasksH))
+	m.chat.SetSize(in(l.centerW, l.bodyH))
 	m.inspect.SetSize(in(l.inspW, l.bodyH))
-	m.chat.SetSize(in(l.centerW, l.chatH))
 }
 
 // ---- update ----
@@ -326,6 +332,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, next
 	case EventMsg:
 		return m.onEvent(msg.Event)
+	case ChatHistoryMsg:
+		if msg.Err != nil {
+			m.setError("history: " + msg.Err.Error())
+		}
+		return m, m.chat.Update(msg)
 	case ChatReplyMsg:
 		cmd := m.chat.Update(msg)
 		// The lead may have created or changed tasks.
@@ -366,7 +377,13 @@ func (m *Model) syncSpace() tea.Cmd {
 		return nil
 	}
 	m.chat.SetSpace(s.ID, s.Name)
-	return m.loadTasks(s.ID)
+	cmds := []tea.Cmd{m.loadTasks(s.ID)}
+	// Restore the persisted transcript once per space (and retry after a
+	// failure); live replies are appended locally afterwards.
+	if m.chat.NeedsHistory() {
+		cmds = append(cmds, m.chat.LoadHistory(s.ID))
+	}
+	return tea.Batch(cmds...)
 }
 
 func (m Model) onTasks(msg TasksMsg) (tea.Model, tea.Cmd) {
@@ -457,11 +474,25 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, next
 	}
 	if m.focus == FocusChat {
-		if key.Matches(msg, m.keys.Back) {
+		if key.Matches(msg, m.keys.Back) && strings.TrimSpace(m.chat.Value()) == "" {
 			next := m.setFocus(FocusTasks)
 			return m, next
 		}
 		return m, m.chat.Update(msg)
+	}
+	switch {
+	case key.Matches(msg, m.keys.FocusSpaces):
+		next := m.setFocus(FocusSpaces)
+		return m, next
+	case key.Matches(msg, m.keys.FocusTasks):
+		next := m.setFocus(FocusTasks)
+		return m, next
+	case key.Matches(msg, m.keys.FocusChat):
+		next := m.setFocus(FocusChat)
+		return m, next
+	case key.Matches(msg, m.keys.FocusInspector):
+		next := m.setFocus(FocusInspector)
+		return m, next
 	}
 	switch {
 	case key.Matches(msg, m.keys.Quit):
@@ -472,9 +503,6 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, m.keys.Back):
 		m.showHelp = false
 		return m, nil
-	case key.Matches(msg, m.keys.Lead):
-		next := m.setFocus(FocusChat)
-		return m, next
 	case key.Matches(msg, m.keys.View):
 		m.tasks.SetMode(ViewMode((int(m.tasks.Mode()) + 1) % len(TaskViewLabels)))
 		return m, nil
@@ -691,13 +719,13 @@ func (m Model) body(l layout) string {
 	if l.compact {
 		return m.pane(m.focus, m.width, l.bodyH)
 	}
-	center := lipgloss.JoinVertical(lipgloss.Left,
-		m.pane(FocusTasks, l.centerW, l.tasksH),
-		m.pane(FocusChat, l.centerW, l.chatH),
+	left := lipgloss.JoinVertical(lipgloss.Left,
+		m.pane(FocusSpaces, l.leftW, l.spacesH),
+		m.pane(FocusTasks, l.leftW, l.tasksH),
 	)
 	return lipgloss.JoinHorizontal(lipgloss.Top,
-		m.pane(FocusSpaces, l.spacesW, l.bodyH),
-		center,
+		left,
+		m.pane(FocusChat, l.centerW, l.bodyH),
 		m.pane(FocusInspector, l.inspW, l.bodyH),
 	)
 }
@@ -761,10 +789,10 @@ func (m Model) footer() string {
 		return m.help.ShortHelpView([]key.Binding{k.Send, k.Newline, k.Focus, k.Back})
 	case m.showHelp:
 		return m.help.ShortHelpView([]key.Binding{
-			k.Delegate, k.New, k.Approve, k.Review, k.Worktree, k.Lead, k.Help, k.Quit,
+			k.Delegate, k.New, k.Approve, k.Review, k.Worktree, k.FocusChat, k.Help, k.Quit,
 		})
 	}
 	return m.help.ShortHelpView([]key.Binding{
-		k.Focus, k.Delegate, k.New, k.Approve, k.Review, k.Worktree, k.Lead, k.Help, k.Quit,
+		k.Focus, k.Delegate, k.New, k.Approve, k.Review, k.Worktree, k.FocusChat, k.Help, k.Quit,
 	})
 }

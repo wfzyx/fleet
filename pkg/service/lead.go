@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -42,10 +43,95 @@ func defaultLeadStarter(ctx context.Context, o pi.LeadOptions) (LeadProcess, err
 	return pi.StartLead(ctx, o)
 }
 
+// Chat message roles stored in chat.json.
+const (
+	RoleUser   = "user"
+	RoleLead   = "lead"
+	RoleSystem = "system"
+)
+
+// ChatMessage is one persisted entry of a space's lead conversation.
+type ChatMessage struct {
+	Role string    `json:"role"` // "user" | "lead" | "system"
+	Text string    `json:"text"`
+	At   time.Time `json:"at"`
+}
+
+// chatFile is the on-disk form of chat.json.
+type chatFile struct {
+	Messages []ChatMessage `json:"messages"`
+}
+
+// chatPath is $XDG_DATA_HOME/fleet/spaces/<space>/chat.json.
+func (s *Service) chatPath(space string) (string, error) {
+	if err := config.ValidateID(space); err != nil {
+		return "", fmt.Errorf("%w: space id: %v", ErrInvalidArgument, err)
+	}
+	return filepath.Join(s.paths.DataDir, "spaces", space, "chat.json"), nil
+}
+
+func (s *Service) readChat(space string) ([]ChatMessage, error) {
+	path, err := s.chatPath(space)
+	if err != nil {
+		return nil, err
+	}
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return []ChatMessage{}, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("service: read chat %s: %w", space, err)
+	}
+	var f chatFile
+	if err := json.Unmarshal(data, &f); err != nil {
+		return nil, fmt.Errorf("service: parse %s: %w", path, err)
+	}
+	if f.Messages == nil {
+		f.Messages = []ChatMessage{}
+	}
+	return f.Messages, nil
+}
+
+// ChatHistory returns the persisted conversation of a space's lead, oldest
+// first. A space without conversation yields an empty slice.
+func (s *Service) ChatHistory(space string) ([]ChatMessage, error) {
+	if _, err := s.GetSpace(space); err != nil {
+		return nil, err
+	}
+	l := s.leadFor(space)
+	l.hmu.Lock()
+	defer l.hmu.Unlock()
+	return s.readChat(space)
+}
+
+// recordChat appends msgs to the space's chat.json (atomic write).
+func (s *Service) recordChat(space string, msgs ...ChatMessage) error {
+	path, err := s.chatPath(space)
+	if err != nil {
+		return err
+	}
+	l := s.leadFor(space)
+	l.hmu.Lock()
+	defer l.hmu.Unlock()
+	hist, err := s.readChat(space)
+	if err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(chatFile{Messages: append(hist, msgs...)}, "", "  ")
+	if err != nil {
+		return fmt.Errorf("service: encode chat: %w", err)
+	}
+	if err := config.WriteFileAtomic(path, append(data, '\n'), 0o600); err != nil {
+		return fmt.Errorf("service: save chat %s: %w", space, err)
+	}
+	return nil
+}
+
 // lead is the per-space chat session. sem serialises conversations; mu
-// guards proc and working.
+// guards proc and working; hmu guards chat.json.
 type lead struct {
 	sem chan struct{}
+	hmu sync.Mutex
 
 	mu      sync.Mutex
 	proc    LeadProcess
@@ -92,6 +178,9 @@ func (s *Service) LeadStatuses() map[string]string {
 // process is started on first use and kept for later messages; its Pi session
 // is resumable, so a restart keeps the conversation. Messages to one space
 // are handled one at a time in call order of arrival.
+//
+// Both the message and the reply (or the failure, as a system message) are
+// appended to the space's persistent transcript, see ChatHistory.
 func (s *Service) Chat(ctx context.Context, space, text string) (string, error) {
 	text = strings.TrimSpace(text)
 	if text == "" {
@@ -115,6 +204,29 @@ func (s *Service) Chat(ctx context.Context, space, text string) (string, error) 
 	if closed {
 		return "", ErrShutdown
 	}
+
+	if err := s.recordChat(space, ChatMessage{Role: RoleUser, Text: text, At: time.Now().UTC()}); err != nil {
+		return "", err
+	}
+	reply, err := s.converse(ctx, sp, l, text)
+	rec := ChatMessage{Role: RoleLead, Text: reply, At: time.Now().UTC()}
+	switch {
+	case err != nil:
+		rec.Role, rec.Text = RoleSystem, "error: "+err.Error()
+	case strings.TrimSpace(reply) == "":
+		return reply, nil // nothing to record
+	}
+	if rerr := s.recordChat(space, rec); rerr != nil && err == nil {
+		return reply, rerr
+	}
+	return reply, err
+}
+
+// converse runs one prompt/reply turn against the space's lead process,
+// starting it when needed. The caller holds l.sem.
+func (s *Service) converse(ctx context.Context, sp config.Space, l *lead, text string) (string, error) {
+	space := sp.ID
+	var err error
 
 	l.mu.Lock()
 	l.working = true

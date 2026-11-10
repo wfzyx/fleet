@@ -28,6 +28,7 @@ type API interface {
 	Merge(ctx context.Context, task string) (schema.Task, error)
 	CloseTask(ctx context.Context, task, note string) (schema.Task, error)
 	Chat(ctx context.Context, space, text string) (string, error)
+	ChatHistory(ctx context.Context, space string) ([]ChatMessage, error)
 	LeadStatuses(ctx context.Context) (map[string]string, error)
 }
 
@@ -96,6 +97,11 @@ func (l Local) CloseTask(ctx context.Context, task, note string) (schema.Task, e
 // Chat implements API.
 func (l Local) Chat(ctx context.Context, space, text string) (string, error) {
 	return l.S.Chat(ctx, space, text)
+}
+
+// ChatHistory implements API.
+func (l Local) ChatHistory(_ context.Context, space string) ([]ChatMessage, error) {
+	return l.S.ChatHistory(space)
 }
 
 // LeadStatuses implements API.
@@ -244,6 +250,26 @@ func reviewToSchema(r ReviewRecord) schema.ReviewVerdict {
 // Chat implements tui.Backend by sending text to the space's lead.
 func (a *Adapter) Chat(ctx context.Context, spaceID, text string) (string, error) {
 	return a.SendLeadMessage(ctx, spaceID, text)
+}
+
+// ChatHistory implements tui.Backend: the persisted lead conversation.
+func (a *Adapter) ChatHistory(ctx context.Context, spaceID string) ([]tui.ChatMessage, error) {
+	msgs, err := a.api.ChatHistory(ctx, spaceID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]tui.ChatMessage, 0, len(msgs))
+	for _, m := range msgs {
+		role := tui.ChatSystem
+		switch m.Role {
+		case RoleUser:
+			role = tui.ChatUser
+		case RoleLead:
+			role = tui.ChatLead
+		}
+		out = append(out, tui.ChatMessage{Role: role, Text: m.Text, At: m.At.Local()})
+	}
+	return out, nil
 }
 
 // CreateTask implements tui.Backend: it registers a queued task whose ID is

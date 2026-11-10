@@ -4,12 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"fleet/pkg/pi"
+	"fleet/pkg/tui"
 )
 
 // fakeLead stands in for a headless Pi lead process.
@@ -296,5 +299,128 @@ func TestAwaitSettledFailures(t *testing.T) {
 	_ = f.Stop(0) // a real process closes its event stream, then reports done
 	if _, err := awaitSettled(bg, f); err == nil {
 		t.Error("closed event stream without settle returned no error")
+	}
+}
+
+func TestChatPersistsConversation(t *testing.T) {
+	e := newEnv(t)
+	ls := &leadStarter{}
+	e.svc.opts.StartLead = ls.start
+
+	if h, err := e.svc.ChatHistory("alpha"); err != nil || h == nil || len(h) != 0 {
+		t.Fatalf("empty history = %#v, %v", h, err)
+	}
+	before := time.Now().Add(-time.Second)
+	if _, err := e.svc.Chat(bg, "alpha", " hello "); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.svc.Chat(bg, "alpha", "again"); err != nil {
+		t.Fatal(err)
+	}
+	h, err := e.svc.ChatHistory("alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []ChatMessage{
+		{Role: RoleUser, Text: "hello"}, {Role: RoleLead, Text: "re: hello"},
+		{Role: RoleUser, Text: "again"}, {Role: RoleLead, Text: "re: again"},
+	}
+	if len(h) != len(want) {
+		t.Fatalf("history = %+v", h)
+	}
+	for i, m := range h {
+		if m.Role != want[i].Role || m.Text != want[i].Text {
+			t.Errorf("history[%d] = %+v, want %+v", i, m, want[i])
+		}
+		if m.At.Before(before) || (i > 0 && m.At.Before(h[i-1].At)) {
+			t.Errorf("history[%d].At = %v", i, m.At)
+		}
+	}
+
+	// On disk under $XDG_DATA_HOME/fleet/spaces/<space>/chat.json, without
+	// temp-file leftovers.
+	dir := filepath.Join(e.paths.DataDir, "spaces", "alpha")
+	data, err := os.ReadFile(filepath.Join(dir, "chat.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var f chatFile
+	if err := json.Unmarshal(data, &f); err != nil || len(f.Messages) != 4 {
+		t.Errorf("chat.json = %s (%v)", data, err)
+	}
+	if ents, _ := os.ReadDir(dir); len(ents) != 1 {
+		t.Errorf("leftover files in %s: %v", dir, ents)
+	}
+	if fi, _ := os.Stat(filepath.Join(dir, "chat.json")); fi.Mode().Perm() != 0o600 {
+		t.Errorf("chat.json mode = %v", fi.Mode())
+	}
+}
+
+func TestChatHistoryKeepsFailuresAndIsPerSpace(t *testing.T) {
+	e := newEnv(t)
+	ls := &leadStarter{err: errors.New("no pi")}
+	e.svc.opts.StartLead = ls.start
+	if _, err := e.svc.Chat(bg, "alpha", "hi"); err == nil {
+		t.Fatal("expected start failure")
+	}
+	h, err := e.svc.ChatHistory("alpha")
+	if err != nil || len(h) != 2 {
+		t.Fatalf("history = %+v, %v", h, err)
+	}
+	if h[0].Role != RoleUser || h[0].Text != "hi" || h[1].Role != RoleSystem || !strings.Contains(h[1].Text, "no pi") {
+		t.Errorf("history = %+v", h)
+	}
+	if _, err := e.svc.ChatHistory("ghost"); !errors.Is(err, ErrNoSuchSpace) {
+		t.Errorf("unknown space: %v", err)
+	}
+	if _, err := e.svc.Chat(bg, "alpha", "   "); !errors.Is(err, ErrInvalidArgument) {
+		t.Fatal(err)
+	}
+	if h, _ := e.svc.ChatHistory("alpha"); len(h) != 2 {
+		t.Errorf("rejected message was recorded: %+v", h)
+	}
+}
+
+func TestChatHistoryCorruptFile(t *testing.T) {
+	e := newEnv(t)
+	dir := filepath.Join(e.paths.DataDir, "spaces", "alpha")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "chat.json"), []byte("{nope"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.svc.ChatHistory("alpha"); err == nil || !strings.Contains(err.Error(), "chat.json") {
+		t.Errorf("corrupt history: %v", err)
+	}
+}
+
+func TestChatHistoryRPCAndAdapter(t *testing.T) {
+	e := newEnv(t)
+	ls := &leadStarter{}
+	e.svc.opts.StartLead = ls.start
+	_, c := startServer(t, e)
+
+	if h, err := c.ChatHistory(bg, "alpha"); err != nil || len(h) != 0 {
+		t.Fatalf("empty rpc history = %v, %v", h, err)
+	}
+	if _, err := c.Chat(bg, "alpha", "over the wire"); err != nil {
+		t.Fatal(err)
+	}
+	h, err := c.ChatHistory(bg, "alpha")
+	if err != nil || len(h) != 2 || h[0].Role != RoleUser || h[1].Text != "re: over the wire" {
+		t.Fatalf("rpc history = %+v, %v", h, err)
+	}
+	if _, err := c.ChatHistory(bg, "ghost"); !errors.Is(err, ErrNoSuchSpace) {
+		t.Errorf("rpc unknown space: %v", err)
+	}
+	for name, a := range map[string]*Adapter{"local": NewLocalAdapter(e.svc), "client": NewAdapter(c)} {
+		th, err := a.ChatHistory(bg, "alpha")
+		if err != nil || len(th) != 2 {
+			t.Fatalf("%s: tui history = %+v, %v", name, th, err)
+		}
+		if th[0].Role != tui.ChatUser || th[0].Text != "over the wire" || th[1].Role != tui.ChatLead || th[1].At.IsZero() {
+			t.Errorf("%s: tui history = %+v", name, th)
+		}
 	}
 }

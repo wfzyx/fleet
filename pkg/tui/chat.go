@@ -35,6 +35,7 @@ type ChatMessage struct {
 // ChatBackend is the part of Backend the chat pane needs.
 type ChatBackend interface {
 	Chat(ctx context.Context, spaceID, text string) (string, error)
+	ChatHistory(ctx context.Context, spaceID string) ([]ChatMessage, error)
 }
 
 // conversation is the per-space transcript and send queue.
@@ -43,6 +44,10 @@ type conversation struct {
 	pending bool     // a request is in flight for this space
 	queue   []string // messages typed while pending, sent in order
 	draft   string
+
+	loaded   bool // persisted history has been restored
+	loading  bool // a history request is in flight
+	loadBase int  // len(msgs) when the history request was issued
 }
 
 // ChatModel is the live conversation pane with a space's lead agent. The user
@@ -196,6 +201,50 @@ func (m *ChatModel) dispatch(c *conversation, spaceID, text string) tea.Cmd {
 	return tea.Batch(call, m.spin.Tick)
 }
 
+// NeedsHistory reports whether the active space's persisted transcript has
+// not been restored yet and no request for it is in flight.
+func (m *ChatModel) NeedsHistory() bool {
+	if m.backend == nil || m.spaceID == "" {
+		return false
+	}
+	c := m.conv(m.spaceID)
+	return !c.loaded && !c.loading
+}
+
+// LoadHistory asks the backend for the persisted transcript of spaceID. The
+// answer arrives as a ChatHistoryMsg.
+func (m *ChatModel) LoadHistory(spaceID string) tea.Cmd {
+	if m.backend == nil || spaceID == "" {
+		return nil
+	}
+	c := m.conv(spaceID)
+	c.loading = true
+	c.loadBase = len(c.msgs)
+	backend, ctx := m.backend, m.ctx
+	return func() tea.Msg {
+		msgs, err := backend.ChatHistory(ctx, spaceID)
+		return ChatHistoryMsg{SpaceID: spaceID, Messages: msgs, Err: err}
+	}
+}
+
+// onHistory replaces the transcript with the persisted one. Messages added
+// locally after the request was issued are kept after it.
+func (m *ChatModel) onHistory(msg ChatHistoryMsg) {
+	c := m.conv(msg.SpaceID)
+	c.loading = false
+	if msg.Err != nil {
+		return // loaded stays false: the next refresh retries
+	}
+	c.loaded = true
+	base := min(c.loadBase, len(c.msgs))
+	fresh := append([]ChatMessage(nil), c.msgs[base:]...)
+	c.msgs = append(append([]ChatMessage(nil), msg.Messages...), fresh...)
+	c.loadBase = 0
+	if msg.SpaceID == m.spaceID {
+		m.refresh(true)
+	}
+}
+
 func (m *ChatModel) onReply(msg ChatReplyMsg) tea.Cmd {
 	c := m.conv(msg.SpaceID)
 	switch {
@@ -220,6 +269,9 @@ func (m *ChatModel) Update(msg tea.Msg) tea.Cmd {
 	switch msg := msg.(type) {
 	case ChatReplyMsg:
 		return m.onReply(msg)
+	case ChatHistoryMsg:
+		m.onHistory(msg)
+		return nil
 	case spinner.TickMsg:
 		if !m.Pending() {
 			return nil // let the tick loop die; dispatch restarts it

@@ -15,6 +15,8 @@ type chatFn func(ctx context.Context, spaceID, text string) (string, error)
 
 func (f chatFn) Chat(ctx context.Context, s, t string) (string, error) { return f(ctx, s, t) }
 
+func (f chatFn) ChatHistory(context.Context, string) ([]ChatMessage, error) { return nil, nil }
+
 func newChat(b ChatBackend) *ChatModel {
 	c := NewChat(context.Background(), NewStyles(), b)
 	c.SetSize(60, 14)
@@ -41,6 +43,8 @@ func pump(t *testing.T, c *ChatModel, cmd tea.Cmd) {
 		case tea.BatchMsg:
 			queue = append(queue, v...)
 		case ChatReplyMsg:
+			queue = append(queue, c.Update(v))
+		case ChatHistoryMsg:
 			queue = append(queue, c.Update(v))
 		}
 	}
@@ -224,5 +228,80 @@ func TestChatWrapsAndSanitizes(t *testing.T) {
 	assertBox(t, c.View(), 60, 14)
 	if strings.Contains(c.View(), "\x1b[31m") {
 		t.Error("untrusted escape sequence reached the screen")
+	}
+}
+
+type histBackend struct {
+	chatFn
+	msgs []ChatMessage
+	err  error
+}
+
+func (h histBackend) ChatHistory(context.Context, string) ([]ChatMessage, error) {
+	return h.msgs, h.err
+}
+
+func TestChatLoadHistory(t *testing.T) {
+	at := time.Date(2025, 1, 2, 3, 4, 0, 0, time.UTC)
+	b := histBackend{
+		chatFn: func(context.Context, string, string) (string, error) { return "r", nil },
+		msgs: []ChatMessage{
+			{Role: ChatUser, Text: "old question", At: at},
+			{Role: ChatLead, Text: "old answer", At: at},
+		},
+	}
+	c := newChat(b)
+	if !c.NeedsHistory() {
+		t.Fatal("fresh space should need history")
+	}
+	cmd := c.LoadHistory("s1")
+	if c.NeedsHistory() {
+		t.Error("in-flight load must not be requested twice")
+	}
+	pump(t, c, cmd)
+	if got := c.Messages(); len(got) != 2 || got[1].Text != "old answer" || got[0].Role != ChatUser {
+		t.Fatalf("messages = %+v", got)
+	}
+	if c.NeedsHistory() {
+		t.Error("loaded space must not reload")
+	}
+	if !c.vp.AtBottom() {
+		t.Error("viewport should be scrolled to the bottom")
+	}
+	if v := ansi.Strip(c.View()); !strings.Contains(v, "old answer") {
+		t.Errorf("history not rendered:\n%s", v)
+	}
+}
+
+func TestChatLoadHistoryKeepsMessagesTypedMeanwhile(t *testing.T) {
+	b := histBackend{
+		chatFn: func(context.Context, string, string) (string, error) { return "r", nil },
+		msgs:   []ChatMessage{{Role: ChatLead, Text: "persisted"}},
+	}
+	c := newChat(b)
+	cmd := c.LoadHistory("s1")
+	c.SendMessage("typed while loading") // not pumped: stays pending
+	pump(t, c, cmd)
+	got := c.Messages()
+	if len(got) != 2 || got[0].Text != "persisted" || got[1].Text != "typed while loading" {
+		t.Fatalf("messages = %+v", got)
+	}
+}
+
+func TestChatLoadHistoryErrorRetries(t *testing.T) {
+	c := newChat(histBackend{err: errors.New("boom")})
+	pump(t, c, c.LoadHistory("s1"))
+	if len(c.Messages()) != 0 {
+		t.Errorf("messages = %+v", c.Messages())
+	}
+	if !c.NeedsHistory() {
+		t.Error("failed load should be retried")
+	}
+}
+
+func TestChatLoadHistoryNilBackend(t *testing.T) {
+	c := newChat(nil)
+	if c.LoadHistory("s1") != nil || c.NeedsHistory() {
+		t.Error("nil backend has no history")
 	}
 }

@@ -52,6 +52,9 @@ type Backend interface {
 	Detail(ctx context.Context, task schema.Task) (TaskDetail, error)
 	// Chat sends one message to the space's lead and returns its reply.
 	Chat(ctx context.Context, spaceID, text string) (string, error)
+	// ChatHistory returns the persisted conversation with the space's lead,
+	// oldest first.
+	ChatHistory(ctx context.Context, spaceID string) ([]ChatMessage, error)
 	// CreateTask registers a queued task.
 	CreateTask(ctx context.Context, spaceID, title, brief string) (schema.Task, error)
 	// Delegate hands a queued task to a worker (queued -> working).
@@ -88,6 +91,12 @@ type (
 		Reply   string
 		Err     error
 	}
+	// ChatHistoryMsg delivers the persisted conversation of one space.
+	ChatHistoryMsg struct {
+		SpaceID  string
+		Messages []ChatMessage
+		Err      error
+	}
 	// ActionMsg reports the result of a user-triggered action.
 	ActionMsg struct {
 		Label  string
@@ -112,7 +121,8 @@ func (NopBackend) Tasks(context.Context, string) ([]schema.Task, error) {
 func (NopBackend) Detail(context.Context, schema.Task) (TaskDetail, error) {
 	return TaskDetail{}, nil
 }
-func (NopBackend) Chat(context.Context, string, string) (string, error) { return "", ErrNoBackend }
+func (NopBackend) Chat(context.Context, string, string) (string, error)       { return "", ErrNoBackend }
+func (NopBackend) ChatHistory(context.Context, string) ([]ChatMessage, error) { return nil, nil }
 func (NopBackend) CreateTask(context.Context, string, string, string) (schema.Task, error) {
 	return schema.Task{}, ErrNoBackend
 }

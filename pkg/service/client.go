@@ -273,6 +273,14 @@ func (c *Client) Chat(ctx context.Context, space, text string) (string, error) {
 	return r.Reply, err
 }
 
+// ChatHistory is the typed form of leads.history: the persisted conversation
+// with the space's lead, oldest first.
+func (c *Client) ChatHistory(ctx context.Context, space string) ([]ChatMessage, error) {
+	var msgs []ChatMessage
+	err := c.Call(ctx, "leads.history", HistoryParams{Space: space}, &msgs)
+	return msgs, err
+}
+
 // LeadStatuses is the typed form of leads.status.
 func (c *Client) LeadStatuses(ctx context.Context) (map[string]string, error) {
 	var m map[string]string

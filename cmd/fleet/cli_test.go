@@ -285,6 +285,32 @@ func TestPingReachesLead(t *testing.T) {
 	}
 }
 
+func TestPingPersistsConversation(t *testing.T) {
+	f := newTestFleet(t)
+	f.mustRun("space", "add", "web", f.repo)
+	f.mustRun("ping", "web", "status?")
+	f.mustRun("ping", "web", "again")
+	data, err := os.ReadFile(filepath.Join(os.Getenv("XDG_DATA_HOME"), "fleet", "spaces", "web", "chat.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		Messages []struct{ Role, Text string }
+	}
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatal(err)
+	}
+	want := [][2]string{{"user", "status?"}, {"lead", "reply 2"}, {"user", "again"}, {"lead", "reply 3"}}
+	if len(got.Messages) != len(want) {
+		t.Fatalf("chat.json = %s", data)
+	}
+	for i, w := range want {
+		if got.Messages[i].Role != w[0] || got.Messages[i].Text != w[1] {
+			t.Errorf("message %d = %+v, want %v", i, got.Messages[i], w)
+		}
+	}
+}
+
 func TestNoDaemonHint(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("XDG_RUNTIME_DIR", root)

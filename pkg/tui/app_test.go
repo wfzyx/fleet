@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -60,7 +61,7 @@ func TestAppTooSmall(t *testing.T) {
 func TestAppResponsiveLayout(t *testing.T) {
 	m, _ := loadedApp(t)
 	l := m.layout()
-	if l.compact || l.spacesW+l.centerW+l.inspW != 140 || l.tasksH+l.chatH != l.bodyH {
+	if l.compact || l.leftW+l.centerW+l.inspW != 140 || l.spacesH+l.tasksH != l.bodyH || l.spacesH < 7 || l.spacesH > 10 {
 		t.Errorf("wide layout wrong: %+v", l)
 	}
 	v := ansi.Strip(m.View())
@@ -83,7 +84,7 @@ func TestAppResponsiveLayout(t *testing.T) {
 
 func TestAppFocusCycle(t *testing.T) {
 	m, _ := loadedApp(t)
-	want := []Focus{FocusTasks, FocusInspector, FocusChat, FocusSpaces}
+	want := []Focus{FocusTasks, FocusChat, FocusInspector, FocusSpaces}
 	for i, f := range want {
 		m = press(t, m, "tab")
 		if m.Focus() != f {
@@ -91,11 +92,15 @@ func TestAppFocusCycle(t *testing.T) {
 		}
 	}
 	m = press(t, m, "shift+tab")
+	if m.Focus() != FocusInspector {
+		t.Errorf("shift+tab: focus = %s", m.Focus())
+	}
+	m = press(t, m, "shift+tab")
 	if m.Focus() != FocusChat || !m.chat.Focused() {
 		t.Errorf("shift+tab: focus = %s chatFocused=%v", m.Focus(), m.chat.Focused())
 	}
 	m = press(t, m, "tab")
-	if m.chat.Focused() {
+	if m.Focus() != FocusInspector || m.chat.Focused() {
 		t.Error("chat should blur when focus leaves")
 	}
 }
@@ -120,8 +125,9 @@ func TestAppSpaceSwitchLoadsTasksAndChat(t *testing.T) {
 func TestAppTaskSelectionDrivesInspector(t *testing.T) {
 	m, _ := loadedApp(t)
 	m = press(t, m, "tab") // tasks
-	m = press(t, m, "right")
-	m = press(t, m, "right") // review lane
+	m = press(t, m, "down")
+	m = press(t, m, "down")
+	m = press(t, m, "down") // backlog order: t1 t5 t2 t3 t4
 	if m.inspect.TaskID() != "t3" {
 		t.Fatalf("inspector = %q", m.inspect.TaskID())
 	}
@@ -202,7 +208,8 @@ func TestAppDelegate(t *testing.T) {
 		t.Errorf("status = %q err=%v", m.status, m.statusErr)
 	}
 	// Non-queued tasks are refused without calling the backend.
-	m = press(t, m, "right") // working lane
+	m = press(t, m, "down")
+	m = press(t, m, "down") // t2, working
 	m = press(t, m, "d")
 	if !m.statusErr || !strings.Contains(m.status, "only queued") {
 		t.Errorf("status = %q", m.status)
@@ -269,8 +276,9 @@ func TestAppNewTaskDefaultsBriefAndCancel(t *testing.T) {
 func TestAppApproveRequiresConfirmation(t *testing.T) {
 	m, fb := loadedApp(t)
 	m = press(t, m, "tab")
-	m = press(t, m, "right")
-	m = press(t, m, "right") // review lane: t3
+	m = press(t, m, "down")
+	m = press(t, m, "down")
+	m = press(t, m, "down") // t3, review
 	m = press(t, m, "a")
 	if m.overlay != overlayConfirm {
 		t.Fatal("a should ask for confirmation")
@@ -304,24 +312,23 @@ func TestAppApproveRefusedOutsideReview(t *testing.T) {
 func TestAppReview(t *testing.T) {
 	m, fb := loadedApp(t)
 	m = press(t, m, "tab")
-	m = press(t, m, "right") // working: t2
+	m = press(t, m, "down")
+	m = press(t, m, "down") // working: t2
 	m = press(t, m, "r")
 	if calls := fb.Calls(); len(calls) != 1 || calls[0] != "review:t2" {
 		t.Errorf("calls = %v", calls)
 	}
 	// In review already: jump to the verdict.
-	m = press(t, m, "right")
+	m = press(t, m, "down")
 	m = press(t, m, "r")
 	if m.Focus() != FocusInspector || m.inspect.Tab() != TabReview {
 		t.Errorf("focus=%s tab=%d", m.Focus(), m.inspect.Tab())
 	}
 	// Queued tasks cannot be reviewed.
-	m = press(t, m, "tab") // chat
-	m = press(t, m, "tab") // spaces
-	m = press(t, m, "tab") // tasks
-	m = press(t, m, "left")
-	m = press(t, m, "left")
-	m = press(t, m, "left")
+	m = press(t, m, "2") // back to tasks
+	m = press(t, m, "up")
+	m = press(t, m, "up")
+	m = press(t, m, "up")
 	m = press(t, m, "r")
 	if !m.statusErr {
 		t.Errorf("expected refusal, status = %q", m.status)
@@ -335,7 +342,8 @@ func TestAppWorktree(t *testing.T) {
 	if !m.statusErr || m.Focus() != FocusTasks {
 		t.Errorf("status=%q focus=%s", m.status, m.Focus())
 	}
-	m = press(t, m, "right") // t2
+	m = press(t, m, "down")
+	m = press(t, m, "down") // t2
 	m = press(t, m, "w")
 	if m.Focus() != FocusInspector || m.inspect.Tab() != TabDiff || !strings.Contains(m.status, "/tmp/wt/t2") {
 		t.Errorf("focus=%s tab=%d status=%q", m.Focus(), m.inspect.Tab(), m.status)
@@ -378,7 +386,8 @@ func TestAppViewToggleAndHelp(t *testing.T) {
 func TestAppEventUpdatesInspectorAndProgress(t *testing.T) {
 	m, _ := loadedApp(t)
 	m = press(t, m, "tab")
-	m = press(t, m, "right") // t2
+	m = press(t, m, "down")
+	m = press(t, m, "down") // t2
 	spend := 0.1
 	nm, _ := m.Update(EventMsg{Event: schema.AgentEvent{
 		Type: schema.EventTaskProgress, TaskID: "t2", SpaceID: "s1", Role: schema.RoleWorker,
@@ -386,7 +395,7 @@ func TestAppEventUpdatesInspectorAndProgress(t *testing.T) {
 	}})
 	m = nm.(Model)
 	m.inspect.SetTab(TabLogs)
-	if !strings.Contains(ansi.Strip(m.inspect.View()), "12:00:00 worker task_progress: fixed") {
+	if v := ansi.Strip(m.inspect.View()); !strings.Contains(v, "12:00:00 worker task_progress:") || !strings.Contains(v, "fixed") {
 		t.Errorf("event not in logs:\n%s", ansi.Strip(m.inspect.View()))
 	}
 	nm, _ = m.Update(EventMsg{Event: schema.AgentEvent{
@@ -459,5 +468,101 @@ func TestFocusString(t *testing.T) {
 		if f.String() != want {
 			t.Errorf("%d = %q", f, f.String())
 		}
+	}
+}
+
+func TestAppLayoutAgentWindowFullHeight(t *testing.T) {
+	m, _ := loadedApp(t)
+	l := m.layout()
+	if l.spacesH < 7 || l.spacesH > 10 || l.spacesH+l.tasksH != l.bodyH {
+		t.Fatalf("left column heights wrong: %+v", l)
+	}
+	if l.centerW < l.leftW || l.centerW < l.inspW {
+		t.Errorf("center column should be the widest: %+v", l)
+	}
+	if m.chat.height != l.bodyH-3 || m.chat.width != l.centerW-4 {
+		t.Errorf("chat size = %dx%d, layout %+v", m.chat.width, m.chat.height, l)
+	}
+	if m.inspect.height != l.bodyH-3 {
+		t.Errorf("inspector height = %d, want %d", m.inspect.height, l.bodyH-3)
+	}
+	if m.spaces.height != l.spacesH-3 || m.tasks.height != l.tasksH-3 || m.tasks.width != l.leftW-4 {
+		t.Errorf("left panes mis-sized: spaces h=%d tasks %dx%d", m.spaces.height, m.tasks.width, m.tasks.height)
+	}
+}
+
+func TestAppQuickFocusKeys(t *testing.T) {
+	m, _ := loadedApp(t)
+	for _, tc := range []struct {
+		key  string
+		want Focus
+	}{{"2", FocusTasks}, {"4", FocusInspector}, {"1", FocusSpaces}, {"3", FocusChat}} {
+		m = press(t, m, tc.key)
+		if m.Focus() != tc.want {
+			t.Fatalf("%s: focus = %s, want %s", tc.key, m.Focus(), tc.want)
+		}
+	}
+	if !m.chat.Focused() {
+		t.Error("3 should focus the chat input")
+	}
+	m = press(t, m, "1") // typed into the chat, not a quick key
+	if m.Focus() != FocusChat || m.chat.Value() != "1" {
+		t.Errorf("focus=%s value=%q", m.Focus(), m.chat.Value())
+	}
+	m = press(t, m, "esc") // draft present: esc keeps focus
+	if m.Focus() != FocusChat {
+		t.Errorf("esc with draft left chat: %s", m.Focus())
+	}
+	m = press(t, m, "backspace")
+	m = press(t, m, "esc")
+	if m.Focus() != FocusTasks || m.chat.Focused() {
+		t.Errorf("esc on empty chat: focus=%s focused=%v", m.Focus(), m.chat.Focused())
+	}
+	m = press(t, m, "l")
+	if m.Focus() != FocusChat {
+		t.Errorf("l: focus = %s", m.Focus())
+	}
+}
+
+func TestAppRestoresChatHistory(t *testing.T) {
+	fb := newFake()
+	at := time.Date(2025, 1, 2, 3, 4, 0, 0, time.UTC)
+	fb.history = map[string][]ChatMessage{
+		"s1": {{Role: ChatUser, Text: "hello", At: at}, {Role: ChatLead, Text: "welcome back", At: at}},
+		"s2": {{Role: ChatLead, Text: "beta history", At: at}},
+	}
+	m := New(Options{Backend: fb, RefreshInterval: -1})
+	m = resized(t, m, 140, 40)
+	m = settle(t, m, m.Init())
+	if got := m.chat.Messages(); len(got) != 2 || got[1].Text != "welcome back" {
+		t.Fatalf("s1 history = %+v", got)
+	}
+	m = press(t, m, "down")
+	if got := m.chat.Messages(); len(got) != 1 || got[0].Text != "beta history" {
+		t.Fatalf("s2 history = %+v", got)
+	}
+	// Refreshes must not reload what was restored already.
+	fb.mu.Lock()
+	n := len(fb.histCalls)
+	fb.mu.Unlock()
+	if n != 2 {
+		t.Errorf("history calls = %d, want 2", n)
+	}
+	m = settle(t, m, m.startRefresh())
+	fb.mu.Lock()
+	defer fb.mu.Unlock()
+	if len(fb.histCalls) != n {
+		t.Errorf("refresh reloaded history: %v", fb.histCalls)
+	}
+}
+
+func TestAppChatHistoryErrorShown(t *testing.T) {
+	fb := newFake()
+	fb.histErr = errors.New("disk gone")
+	m := New(Options{Backend: fb, RefreshInterval: -1})
+	m = resized(t, m, 140, 40)
+	m = settle(t, m, m.Init())
+	if !m.statusErr || !strings.Contains(m.status, "history: disk gone") {
+		t.Errorf("status = %q", m.status)
 	}
 }

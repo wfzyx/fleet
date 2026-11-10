@@ -18,13 +18,16 @@ import (
 
 // fakeBackend is a deterministic in-memory Backend.
 type fakeBackend struct {
-	mu      sync.Mutex
-	spaces  []SpaceInfo
-	tasks   map[string][]schema.Task
-	details map[string]TaskDetail
-	chatFn  func(spaceID, text string) (string, error)
-	calls   []string
-	failAct error
+	mu        sync.Mutex
+	spaces    []SpaceInfo
+	tasks     map[string][]schema.Task
+	details   map[string]TaskDetail
+	chatFn    func(spaceID, text string) (string, error)
+	history   map[string][]ChatMessage
+	histErr   error
+	histCalls []string
+	calls     []string
+	failAct   error
 }
 
 func (f *fakeBackend) rec(s string) {
@@ -54,6 +57,15 @@ func (f *fakeBackend) Chat(_ context.Context, id, text string) (string, error) {
 		return f.chatFn(id, text)
 	}
 	return "echo " + text, nil
+}
+func (f *fakeBackend) ChatHistory(_ context.Context, id string) ([]ChatMessage, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.histCalls = append(f.histCalls, id) // kept out of calls: it fires on every load
+	if f.histErr != nil {
+		return nil, f.histErr
+	}
+	return append([]ChatMessage(nil), f.history[id]...), nil
 }
 func (f *fakeBackend) CreateTask(_ context.Context, space, title, brief string) (schema.Task, error) {
 	f.rec(fmt.Sprintf("create:%s:%s:%s", space, title, brief))

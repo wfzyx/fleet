@@ -247,6 +247,10 @@ type (
 	ChatResult struct {
 		Reply string `json:"reply"`
 	}
+	// HistoryParams are the parameters of leads.history.
+	HistoryParams struct {
+		Space string `json:"space"`
+	}
 	// DiffResult is the result of tasks.diff.
 	DiffResult struct {
 		Diff string `json:"diff"`
@@ -587,6 +591,9 @@ func (s *Server) buildMethods() map[string]methodFunc {
 		"leads.chat": method(func(ctx context.Context, p ChatParams) (any, error) {
 			reply, err := svc.Chat(ctx, p.Space, p.Message)
 			return ChatResult{Reply: reply}, err
+		}),
+		"leads.history": method(func(_ context.Context, p HistoryParams) (any, error) {
+			return svc.ChatHistory(p.Space)
 		}),
 		"tasks.delegate": method(func(_ context.Context, p DelegateParams) (any, error) {
 			var opts []DelegateOption
