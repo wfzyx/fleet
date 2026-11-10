@@ -11,9 +11,8 @@ import (
 	"sync"
 	"time"
 
-	"fleet/pkg/agent"
 	"fleet/pkg/config"
-	"fleet/pkg/pi"
+	"fleet/pkg/driver"
 )
 
 // Lead states reported by LeadStatuses.
@@ -22,26 +21,6 @@ const (
 	LeadIdle    = "idle"    // process running, waiting for a message
 	LeadWorking = "working" // process is answering a message
 )
-
-// leadStartTimeout bounds how long a fresh lead may take to settle its intro turn.
-const leadStartTimeout = 2 * time.Minute
-
-// LeadProcess is the part of *pi.Process the lead chat uses.
-type LeadProcess interface {
-	Prompt(message string) error
-	Events() <-chan pi.Event
-	Done() <-chan struct{}
-	Abort() error
-	Stop(grace time.Duration) error
-}
-
-// LeadStarter launches a headless lead. The default starts the real Pi
-// binary (pi.StartLead), which sends the lead's intro prompt immediately.
-type LeadStarter func(ctx context.Context, o pi.LeadOptions) (LeadProcess, error)
-
-func defaultLeadStarter(ctx context.Context, o pi.LeadOptions) (LeadProcess, error) {
-	return pi.StartLead(ctx, o)
-}
 
 // Chat message roles stored in chat.json.
 const (
@@ -134,7 +113,7 @@ type lead struct {
 	hmu sync.Mutex
 
 	mu      sync.Mutex
-	proc    LeadProcess
+	proc    driver.LeadSession
 	working bool
 }
 
@@ -264,39 +243,28 @@ func (s *Service) converse(ctx context.Context, sp config.Space, l *lead, text s
 		if err := s.checkBudget(space, ""); err != nil {
 			return "", err
 		}
-		o := pi.LeadOptions{Common: s.common(agent.RoleLead), Space: space, Summary: spaceSummary(sp.Projects)}
+		dir := ""
 		if len(sp.Projects) > 0 {
-			o.Dir = sp.Projects[0].Path
+			dir = sp.Projects[0].Path
 		}
-		if fi, err := os.Stat(o.Dir); o.Dir != "" && (err != nil || !fi.IsDir()) {
-			o.Dir = "" // checkout moved away: run without a working directory
+		if fi, err := os.Stat(dir); dir != "" && (err != nil || !fi.IsDir()) {
+			dir = ""
 		}
-		start := s.opts.StartLead
-		if start == nil {
-			start = defaultLeadStarter
+		req := driver.LeadRequest{
+			Space:   space,
+			Summary: spaceSummary(sp.Projects),
+			Dir:     dir,
 		}
-		proc, err = start(s.ctx, o)
+		proc, err = s.driver.StartLead(s.ctx, req)
 		if err != nil {
 			return "", fmt.Errorf("service: start lead %s: %w", space, err)
 		}
 		l.mu.Lock()
 		l.proc = proc
 		l.mu.Unlock()
-		// The intro turn is not part of the conversation: wait it out.
-		intro, cancel := context.WithTimeout(ctx, leadStartTimeout)
-		_, err := awaitSettled(intro, proc)
-		cancel()
-		if err != nil {
-			drop()
-			return "", fmt.Errorf("service: lead %s intro: %w", space, err)
-		}
 	}
 
-	if err := proc.Prompt(text); err != nil {
-		drop()
-		return "", fmt.Errorf("service: lead %s: %w", space, err)
-	}
-	reply, err := awaitSettled(ctx, proc)
+	reply, err := proc.Prompt(ctx, text)
 	if err != nil {
 		drop()
 		return "", err
@@ -320,7 +288,7 @@ func spaceSummary(ps []config.Project) string {
 // stopLeads terminates the lead process of one space (all when space is empty).
 func (s *Service) stopLeads(space string) {
 	s.leadMu.Lock()
-	var procs []LeadProcess
+	var procs []driver.LeadSession
 	for id, l := range s.leads {
 		if space != "" && id != space {
 			continue
@@ -336,101 +304,4 @@ func (s *Service) stopLeads(space string) {
 	for _, p := range procs {
 		_ = p.Stop(5 * time.Second)
 	}
-}
-
-// awaitSettled consumes proc's events until Pi reports it is settled and
-// returns the text of the last assistant message of that run.
-func awaitSettled(ctx context.Context, proc LeadProcess) (string, error) {
-	var last, failure string
-	events, done := proc.Events(), proc.Done()
-	var grace <-chan time.Time // armed once the process has exited
-	exited := errors.New("lead process exited")
-	for {
-		select {
-		case <-ctx.Done():
-			return "", ctx.Err()
-		case <-done:
-			// The reader closes events before done; give queued records a moment.
-			done = nil
-			if events == nil {
-				return "", exited
-			}
-			grace = time.After(100 * time.Millisecond)
-		case <-grace:
-			return "", exited
-		case ev, ok := <-events:
-			if !ok {
-				events = nil
-				if done == nil {
-					return "", exited
-				}
-				continue
-			}
-			switch ev.Type {
-			case "message_end":
-				if text, errText, ok := assistantMessage(ev.Raw); ok {
-					if text != "" {
-						last = text
-					}
-					if errText != "" {
-						failure = errText
-					}
-				}
-			case "response":
-				var r struct {
-					Success bool   `json:"success"`
-					Error   string `json:"error"`
-				}
-				if json.Unmarshal(ev.Raw, &r) == nil && !r.Success && r.Error != "" {
-					return "", errors.New("lead: " + r.Error)
-				}
-			case "agent_settled":
-				if last == "" && failure != "" {
-					return "", errors.New("lead: " + failure)
-				}
-				return last, nil
-			}
-		}
-	}
-}
-
-// assistantMessage extracts the text (and error message) of an assistant
-// message_end record. ok is false for other roles.
-func assistantMessage(raw json.RawMessage) (text, errText string, ok bool) {
-	var rec struct {
-		Message struct {
-			Role         string          `json:"role"`
-			Content      json.RawMessage `json:"content"`
-			StopReason   string          `json:"stopReason"`
-			ErrorMessage string          `json:"errorMessage"`
-		} `json:"message"`
-	}
-	if json.Unmarshal(raw, &rec) != nil || rec.Message.Role != "assistant" {
-		return "", "", false
-	}
-	var str string
-	if json.Unmarshal(rec.Message.Content, &str) == nil {
-		text = str
-	} else {
-		var blocks []struct {
-			Type string `json:"type"`
-			Text string `json:"text"`
-		}
-		if json.Unmarshal(rec.Message.Content, &blocks) == nil {
-			var parts []string
-			for _, b := range blocks {
-				if b.Type == "text" && strings.TrimSpace(b.Text) != "" {
-					parts = append(parts, b.Text)
-				}
-			}
-			text = strings.Join(parts, "\n\n")
-		}
-	}
-	if rec.Message.StopReason == "error" {
-		errText = rec.Message.ErrorMessage
-		if errText == "" {
-			errText = "assistant run failed"
-		}
-	}
-	return strings.TrimSpace(text), errText, true
 }

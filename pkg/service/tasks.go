@@ -14,7 +14,7 @@ import (
 	"fleet/pkg/config"
 	"fleet/pkg/git"
 	"fleet/pkg/integrations"
-	"fleet/pkg/pi"
+	"fleet/pkg/driver"
 	"fleet/pkg/schema"
 )
 
@@ -181,13 +181,6 @@ func (s *Service) agentConfig(role agent.Role) agent.Config {
 		}
 	}
 	return cfg
-}
-
-func (s *Service) common(role agent.Role) pi.Common {
-	return pi.Common{
-		Binary: s.opts.PiBinary, Config: s.agentConfig(role), Env: s.opts.PiEnv,
-		Extensions: s.opts.PiExtensions, Tracker: s.tracker,
-	}
 }
 
 // ---------------------------------------------------------------- queries
@@ -484,11 +477,15 @@ func (s *Service) runWorker(run *workerRun, rec TaskRecord) {
 		s.mu.Unlock()
 	}()
 
-	res, runErr := s.runner.RunWorker(run.ctx, pi.WorkerOptions{
-		Common: s.common(agent.RoleWorker),
-		Space:  rec.Task.SpaceID, Task: id, Title: rec.Task.Title, Brief: workerBrief(&rec),
-		Branch: rec.Task.Branch, BaseBranch: rec.BaseBranch, Acceptance: rec.Task.AcceptanceCriteria,
-		Worktree: rec.Task.WorktreePath,
+	res, runErr := s.driver.RunWorker(run.ctx, driver.WorkerRequest{
+		Space:      rec.Task.SpaceID,
+		Task:       id,
+		Title:      rec.Task.Title,
+		Brief:      workerBrief(&rec),
+		Branch:     rec.Task.Branch,
+		BaseBranch: rec.BaseBranch,
+		Acceptance: rec.Task.AcceptanceCriteria,
+		Worktree:   rec.Task.WorktreePath,
 	})
 	delta, serr := s.syncSpend(rec.Task.SpaceID, id)
 	if serr != nil {
@@ -759,7 +756,11 @@ func (s *Service) finalize(ctx context.Context, id string, role schema.AgentRole
 	for _, rl := range []agent.Role{agent.RoleWorker, agent.RoleReviewer} {
 		if dir, derr := agent.SessionDir(rl, rec.Task.SpaceID, id); derr == nil {
 			// Spend is already in the ledger; sessions are removed per role policy.
-			_, _ = s.tracker.IngestDir(rec.Task.SpaceID, id, rl, dir)
+			if parser, ok := s.driver.(driver.SessionParser); ok {
+				if sess, err := parser.ParseSessions(dir); err == nil {
+					_, _ = s.tracker.IngestSessions(rec.Task.SpaceID, id, rl, sess)
+				}
+			}
 			pol := agent.DefaultConfig(rl).Cleanup
 			cerr = errors.Join(cerr, agent.Cleaner{}.Apply(pol, agent.OutcomeSucceeded, agent.Targets{SessionDir: dir}))
 		}
@@ -879,11 +880,18 @@ func (s *Service) Review(ctx context.Context, task string) (ReviewResult, error)
 	}
 
 	before := s.tracker.TaskUsage(rec.Task.SpaceID, task).Cost.Total
-	verdict, _, runErr := s.runner.RunReviewer(ctx, pi.ReviewerOptions{
-		Common: s.common(agent.RoleReviewer),
-		Space:  rec.Task.SpaceID, Task: task, Title: rec.Task.Title,
-		Criteria: rec.Task.AcceptanceCriteria, Diff: diff, Worktree: rec.Task.WorktreePath,
+	res, runErr := s.driver.RunReviewer(ctx, driver.ReviewerRequest{
+		Space:    rec.Task.SpaceID,
+		Task:     task,
+		Title:    rec.Task.Title,
+		Criteria: rec.Task.AcceptanceCriteria,
+		Diff:     diff,
+		Worktree: rec.Task.WorktreePath,
 	})
+	var verdict *agent.ReviewVerdict
+	if res != nil {
+		verdict = res.Verdict
+	}
 	_, serr := s.syncSpend(rec.Task.SpaceID, task)
 	cost := s.tracker.TaskUsage(rec.Task.SpaceID, task).Cost.Total - before
 	if runErr != nil {

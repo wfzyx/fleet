@@ -23,6 +23,8 @@ import (
 	"fleet/pkg/config"
 	"fleet/pkg/git"
 	"fleet/pkg/integrations"
+	"fleet/pkg/budget"
+	"fleet/pkg/driver"
 	"fleet/pkg/pi"
 	"fleet/pkg/schema"
 )
@@ -79,31 +81,12 @@ type Worktrees interface {
 	RemoteRepo(ctx context.Context, repo string) (string, error)
 }
 
-// Runner launches Pi agents. The default implementation runs the real Pi
-// binary through package pi.
-type Runner interface {
-	RunWorker(ctx context.Context, o pi.WorkerOptions) (*pi.RunResult, error)
-	RunReviewer(ctx context.Context, o pi.ReviewerOptions) (*agent.ReviewVerdict, *pi.RunResult, error)
-}
-
 // Compile-time checks that the real implementations satisfy the interfaces.
 var (
 	_ GitHubAPI = (*integrations.GitHub)(nil)
 	_ JiraAPI   = (*integrations.Jira)(nil)
 	_ Worktrees = (*git.Manager)(nil)
-	_ Runner    = piRunner{}
 )
-
-type piRunner struct{}
-
-func (piRunner) RunWorker(ctx context.Context, o pi.WorkerOptions) (*pi.RunResult, error) {
-	return pi.RunWorker(ctx, o)
-}
-
-func (piRunner) RunReviewer(ctx context.Context, o pi.ReviewerOptions) (*agent.ReviewVerdict, *pi.RunResult, error) {
-	return pi.RunReviewer(ctx, o)
-}
-
 // Options configures New. Every field is optional.
 type Options struct {
 	// Paths defaults to config.NewPaths().
@@ -114,16 +97,10 @@ type Options struct {
 	Jira JiraAPI
 	// Worktrees defaults to a *git.Manager on Paths.
 	Worktrees Worktrees
-	// Runner defaults to the real Pi runner.
-	Runner Runner
-	// Tracker defaults to a new pi.Tracker restored from the ledger file.
-	Tracker *pi.Tracker
-	// PiBinary, PiEnv and PiExtensions are passed to every Pi invocation.
-	PiBinary     string
-	PiEnv        []string
-	PiExtensions []string
-	// StartLead launches lead agents for Chat; it defaults to the real Pi binary.
-	StartLead LeadStarter
+	// Driver executes coding agents (defaults to the Pi driver).
+	Driver driver.Driver
+	// Tracker defaults to a new budget.Tracker restored from the ledger file.
+	Tracker *budget.Tracker
 	// Now defaults to time.Now.
 	Now func() time.Time
 }
@@ -187,12 +164,11 @@ type Service struct {
 	now   func() time.Time
 
 	wt     Worktrees
-	runner Runner
+	driver driver.Driver
 	gh     GitHubAPI
 	jira   JiraAPI
 
-	tracker *pi.Tracker
-
+	tracker *budget.Tracker
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
@@ -229,7 +205,7 @@ func New(opts Options) (*Service, error) {
 		return nil, err
 	}
 	s := &Service{
-		opts: opts, paths: paths, now: opts.Now, wt: opts.Worktrees, runner: opts.Runner,
+		opts: opts, paths: paths, now: opts.Now, wt: opts.Worktrees, driver: opts.Driver,
 		gh: opts.GitHub, jira: opts.Jira, tracker: opts.Tracker, cfg: cfg,
 		tasks: map[string]*TaskRecord{}, busy: map[string]string{}, runs: map[string]*workerRun{},
 		subs: map[int]chan schema.AgentEvent{}, leads: map[string]*lead{},
@@ -240,14 +216,16 @@ func New(opts Options) (*Service, error) {
 	if s.wt == nil {
 		s.wt = git.NewManager(paths)
 	}
-	if s.runner == nil {
-		s.runner = piRunner{}
-	}
 	if s.tracker == nil {
-		s.tracker = pi.NewTracker(pi.Budgets{})
+		s.tracker = budget.NewTracker(budget.Budgets{})
 		if err := s.tracker.Load(s.ledgerPath()); err != nil {
 			return nil, err
 		}
+	}
+	if s.driver == nil {
+		s.driver = pi.NewDriver(pi.DriverOptions{
+			Tracker: s.tracker,
+		})
 	}
 	if err := s.loadTasks(); err != nil {
 		return nil, err
@@ -560,7 +538,7 @@ func (s *Service) SetFleetBudget(maxUSD float64) error {
 
 // refreshBudgetsLocked rebuilds the tracker's limits from the config.
 func (s *Service) refreshBudgetsLocked() {
-	b := pi.Budgets{SpaceOverrides: map[string]float64{}, TaskOverrides: map[string]float64{}}
+	b := budget.Budgets{SpaceOverrides: map[string]float64{}, TaskOverrides: map[string]float64{}}
 	for _, sp := range s.cfg.Spaces {
 		if sp.MaxBudgetUSD > 0 {
 			b.SpaceOverrides[sp.ID] = sp.MaxBudgetUSD
@@ -586,7 +564,7 @@ func (s *Service) checkBudget(space, task string) error {
 	b := s.cfg.Budget
 	s.mu.Unlock()
 	if b.Exceeded() {
-		return fmt.Errorf("%w: fleet spent $%.4f of $%.4f", pi.ErrBudgetExceeded, b.CurrentSpendUSD, b.MaxBudgetUSD)
+		return fmt.Errorf("%w: fleet spent $%.4f of $%.4f", budget.ErrBudgetExceeded, b.CurrentSpendUSD, b.MaxBudgetUSD)
 	}
 	return nil
 }
@@ -627,9 +605,9 @@ func (s *Service) syncSpend(space, task string) (float64, error) {
 type CostReport struct {
 	Space    string            `json:"space,omitempty"`
 	Task     string            `json:"task,omitempty"`
-	Usage    pi.Usage          `json:"usage"`
-	Models   []pi.ModelUsage   `json:"models,omitempty"`
-	Statuses []pi.BudgetStatus `json:"statuses,omitempty"`
+	Usage    budget.Usage          `json:"usage"`
+	Models   []budget.ModelUsage   `json:"models,omitempty"`
+	Statuses []budget.BudgetStatus `json:"statuses,omitempty"`
 	Fleet    config.Budget     `json:"fleet"`
 }
 
@@ -650,8 +628,12 @@ func (s *Service) Cost(space, task string) (CostReport, error) {
 			if err != nil {
 				return CostReport{}, err
 			}
-			if _, err := s.tracker.IngestDir(space, id, role, dir); err != nil {
-				return CostReport{}, err
+			if parser, ok := s.driver.(driver.SessionParser); ok {
+				if sess, err := parser.ParseSessions(dir); err == nil {
+					if _, err := s.tracker.IngestSessions(space, id, role, sess); err != nil {
+						return CostReport{}, err
+					}
+				}
 			}
 		}
 		if _, err := s.syncSpend(space, id); err != nil {

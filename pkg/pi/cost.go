@@ -15,121 +15,22 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"fleet/pkg/budget"
 )
 
-// IdleGap is the largest gap between two session entries that still counts as
-// active time in SessionStats.ActiveDuration.
-const IdleGap = 10 * time.Minute
+// Types re-exported from pkg/budget.
+type (
+	Cost         = budget.Cost
+	Usage        = budget.Usage
+	ModelUsage   = budget.ModelUsage
+	SessionStats = budget.SessionStats
+)
 
-// Cost is a dollar cost split by token class.
-type Cost struct {
-	Input      float64 `json:"input"`
-	Output     float64 `json:"output"`
-	CacheRead  float64 `json:"cache_read"`
-	CacheWrite float64 `json:"cache_write"`
-	Total      float64 `json:"total"`
-}
+const IdleGap = budget.IdleGap
 
-// Usage is an aggregate of token counts and cost.
-type Usage struct {
-	Input       int64 `json:"input"`
-	Output      int64 `json:"output"`
-	CacheRead   int64 `json:"cache_read"`
-	CacheWrite  int64 `json:"cache_write"`
-	Reasoning   int64 `json:"reasoning,omitempty"` // already included in Output
-	TotalTokens int64 `json:"total_tokens"`
-	Cost        Cost  `json:"cost"`
-}
+var SumSessions = budget.SumSessions
 
-// Add accumulates o into u.
-func (u *Usage) Add(o Usage) {
-	u.Input += o.Input
-	u.Output += o.Output
-	u.CacheRead += o.CacheRead
-	u.CacheWrite += o.CacheWrite
-	u.Reasoning += o.Reasoning
-	u.TotalTokens += o.TotalTokens
-	u.Cost.Input += o.Cost.Input
-	u.Cost.Output += o.Cost.Output
-	u.Cost.CacheRead += o.Cost.CacheRead
-	u.Cost.CacheWrite += o.Cost.CacheWrite
-	u.Cost.Total += o.Cost.Total
-}
-
-// IsZero reports whether no tokens or dollars are recorded.
-func (u Usage) IsZero() bool { return u == Usage{} }
-
-// ModelUsage is the usage attributed to one provider/model pair.
-type ModelUsage struct {
-	Provider string `json:"provider"`
-	Model    string `json:"model"`
-	// Requests counts usage-bearing entries (assistant messages, usage
-	// entries, compaction and branch summaries).
-	Requests int `json:"requests"`
-	Usage
-}
-
-// Key returns "provider/model", or just the model when no provider is known.
-func (m ModelUsage) Key() string { return modelKey(m.Provider, m.Model) }
-
-func modelKey(provider, model string) string {
-	switch {
-	case model == "":
-		return "unknown"
-	case provider == "":
-		return model
-	}
-	return provider + "/" + model
-}
-
-// SessionStats is everything extracted from one session file.
-type SessionStats struct {
-	Path string `json:"path,omitempty"`
-	ID   string `json:"id,omitempty"`
-	CWD  string `json:"cwd,omitempty"`
-	Name string `json:"name,omitempty"`
-
-	Start time.Time `json:"start,omitempty"`
-	End   time.Time `json:"end,omitempty"`
-	// Duration is wall-clock time from the first to the last entry.
-	Duration time.Duration `json:"duration"`
-	// ActiveDuration is Duration without gaps longer than IdleGap, which is
-	// the meaningful figure for long-lived lead sessions.
-	ActiveDuration time.Duration `json:"active_duration"`
-
-	Total Usage `json:"total"`
-	// ByModel is keyed by "provider/model" and sorted via Models().
-	ByModel map[string]*ModelUsage `json:"by_model"`
-
-	// Messages counts user and assistant messages.
-	Messages int `json:"messages"`
-	// Malformed counts lines that were not valid JSON (e.g. a torn last line
-	// of a session still being written).
-	Malformed int `json:"malformed,omitempty"`
-}
-
-// Models returns the per-model usage sorted by descending cost, then key.
-func (s *SessionStats) Models() []ModelUsage {
-	out := make([]ModelUsage, 0, len(s.ByModel))
-	for _, m := range s.ByModel {
-		out = append(out, *m)
-	}
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].Cost.Total != out[j].Cost.Total {
-			return out[i].Cost.Total > out[j].Cost.Total
-		}
-		return out[i].Key() < out[j].Key()
-	})
-	return out
-}
-
-// PrimaryModel returns the model key with the highest cost ("" if none).
-func (s *SessionStats) PrimaryModel() string {
-	if m := s.Models(); len(m) > 0 {
-		return m[0].Key()
-	}
-	return ""
-}
 
 // rawUsage mirrors Pi's Usage object.
 type rawUsage struct {
@@ -223,7 +124,7 @@ func ParseSession(r io.Reader) (*SessionStats, error) {
 	for {
 		line, err := br.ReadBytes('\n')
 		if len(line) > 0 {
-			if perr := st.consume(line, seen, &curProvider, &curModel, &prev); perr != nil {
+			if perr := consume(st, line, seen, &curProvider, &curModel, &prev); perr != nil {
 				return nil, perr
 			}
 		}
@@ -240,7 +141,7 @@ func ParseSession(r io.Reader) (*SessionStats, error) {
 	return st, nil
 }
 
-func (st *SessionStats) consume(line []byte, seen map[string]struct{}, curProv, curModel *string, prev *time.Time) error {
+func consume(st *SessionStats, line []byte, seen map[string]struct{}, curProv, curModel *string, prev *time.Time) error {
 	line = bytes.TrimSpace(line)
 	if len(line) == 0 {
 		return nil
@@ -295,23 +196,23 @@ func (st *SessionStats) consume(line []byte, seen map[string]struct{}, curProv, 
 			if model == "" {
 				prov, model = *curProv, *curModel
 			}
-			st.addUsage(prov, model, e.Message.Usage)
+			addUsage(st, prov, model, e.Message.Usage)
 		case "toolResult": // nested model work, when present
-			st.addUsage(*curProv, *curModel, e.Message.Usage)
+			addUsage(st, *curProv, *curModel, e.Message.Usage)
 		}
 	case "usage":
 		prov, model := e.Provider, e.Model
 		if model == "" {
 			prov, model = *curProv, *curModel
 		}
-		st.addUsage(prov, model, e.Usage)
+		addUsage(st, prov, model, e.Usage)
 	case "compaction", "branch_summary":
-		st.addUsage(*curProv, *curModel, e.Usage)
+		addUsage(st, *curProv, *curModel, e.Usage)
 	}
 	return nil
 }
 
-func (st *SessionStats) addUsage(provider, model string, ru *rawUsage) {
+func addUsage(st *SessionStats, provider, model string, ru *rawUsage) {
 	if ru == nil {
 		return
 	}
@@ -319,7 +220,7 @@ func (st *SessionStats) addUsage(provider, model string, ru *rawUsage) {
 	if u.IsZero() {
 		return
 	}
-	key := modelKey(provider, model)
+	key := budget.ModelKey(provider, model)
 	mu := st.ByModel[key]
 	if mu == nil {
 		mu = &ModelUsage{Provider: provider, Model: model}
@@ -377,30 +278,3 @@ func ParseSessionDir(dir string) ([]*SessionStats, error) {
 	return out, nil
 }
 
-// SumSessions aggregates usage, per-model usage and durations over sessions.
-func SumSessions(sessions []*SessionStats) *SessionStats {
-	agg := &SessionStats{ByModel: map[string]*ModelUsage{}}
-	for _, s := range sessions {
-		agg.Total.Add(s.Total)
-		agg.Duration += s.Duration
-		agg.ActiveDuration += s.ActiveDuration
-		agg.Messages += s.Messages
-		agg.Malformed += s.Malformed
-		for k, m := range s.ByModel {
-			a := agg.ByModel[k]
-			if a == nil {
-				a = &ModelUsage{Provider: m.Provider, Model: m.Model}
-				agg.ByModel[k] = a
-			}
-			a.Requests += m.Requests
-			a.Usage.Add(m.Usage)
-		}
-		if !s.Start.IsZero() && (agg.Start.IsZero() || s.Start.Before(agg.Start)) {
-			agg.Start = s.Start
-		}
-		if s.End.After(agg.End) {
-			agg.End = s.End
-		}
-	}
-	return agg
-}

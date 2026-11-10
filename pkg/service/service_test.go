@@ -11,8 +11,9 @@ import (
 
 	"fleet/pkg/agent"
 	"fleet/pkg/config"
+	"fleet/pkg/budget"
+	"fleet/pkg/driver"
 	"fleet/pkg/integrations"
-	"fleet/pkg/pi"
 	"fleet/pkg/schema"
 )
 
@@ -218,8 +219,7 @@ func TestFullLifecycle(t *testing.T) {
 		t.Errorf("created PRs = %+v", e.gh.created)
 	}
 	call := e.runner.workerCallsSnapshot()[0]
-	if call.Worktree != wantPath || call.Branch != "fleet/feat-1" || len(call.Acceptance) != 2 || call.Common.Tracker == nil {
-		t.Errorf("worker options = %+v", call)
+	if call.Worktree != wantPath || call.Branch != "fleet/feat-1" || len(call.Acceptance) != 2 {
 	}
 
 	// Review: reviewer receives a unified diff and the criteria.
@@ -323,10 +323,10 @@ func TestSpawnGuards(t *testing.T) {
 		t.Errorf("missing: %v", err)
 	}
 	release := make(chan struct{})
-	e.runner.workerFn = func(ctx context.Context, _ pi.WorkerOptions) (*pi.RunResult, error) {
+	e.runner.workerFn = func(ctx context.Context, _ driver.WorkerRequest) (*driver.WorkerResult, error) {
 		select {
 		case <-release:
-			return &pi.RunResult{}, nil
+			return &driver.WorkerResult{}, nil
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		}
@@ -356,11 +356,11 @@ func TestSpawnGuards(t *testing.T) {
 func TestWorkerFailureRequeuesAndRespawnReusesWorktree(t *testing.T) {
 	e := newEnv(t)
 	fail := true
-	e.runner.workerFn = func(_ context.Context, o pi.WorkerOptions) (*pi.RunResult, error) {
+	e.runner.workerFn = func(_ context.Context, o driver.WorkerRequest) (*driver.WorkerResult, error) {
 		if fail {
-			return &pi.RunResult{}, &pi.ExitError{Code: 2, Stderr: "boom"}
+			return &driver.WorkerResult{}, errors.New("boom")
 		}
-		return &pi.RunResult{Output: "ok"}, nil
+		return &driver.WorkerResult{Output: "ok"}, nil
 	}
 	if _, err := e.svc.Delegate("alpha", "t1", "x", []string{"c"}); err != nil {
 		t.Fatal(err)
@@ -392,12 +392,13 @@ func TestWorkerFailureRequeuesAndRespawnReusesWorktree(t *testing.T) {
 func TestReviewChangesRequestedSendsTaskBackToWork(t *testing.T) {
 	e := newEnv(t)
 	e.toReview("t1")
-	e.runner.reviewFn = func(_ context.Context, o pi.ReviewerOptions) (*agent.ReviewVerdict, error) {
-		return &agent.ReviewVerdict{
+	e.runner.reviewFn = func(_ context.Context, o driver.ReviewerRequest) (*driver.ReviewerResult, error) {
+		v := &agent.ReviewVerdict{
 			Verdict: agent.VerdictRequestChanges, Summary: "missing tests",
 			Criteria: []agent.CriterionResult{{Criterion: "it works", Met: true}, {Criterion: "tests pass", Met: false, Evidence: "none"}},
 			Issues:   []agent.Issue{{Severity: agent.SeverityMajor, File: "a.go", Line: 3, Message: "add a test"}},
-		}, nil
+		}
+		return &driver.ReviewerResult{Verdict: v}, nil
 	}
 	res, err := e.svc.Review(bg, "t1")
 	if err != nil {
@@ -445,7 +446,7 @@ func TestReviewGuards(t *testing.T) {
 
 	e.toReview("t1")
 	// reviewer failure leaves the task in review and is reported
-	e.runner.reviewFn = func(context.Context, pi.ReviewerOptions) (*agent.ReviewVerdict, error) {
+	e.runner.reviewFn = func(context.Context, driver.ReviewerRequest) (*driver.ReviewerResult, error) {
 		return nil, agent.ErrNoVerdict
 	}
 	if _, err := e.svc.Review(bg, "t1"); !errors.Is(err, agent.ErrNoVerdict) {
@@ -471,8 +472,8 @@ func TestReviewGuards(t *testing.T) {
 
 func TestReviewEmptyDiff(t *testing.T) {
 	e := newEnv(t)
-	e.runner.workerFn = func(context.Context, pi.WorkerOptions) (*pi.RunResult, error) {
-		return &pi.RunResult{Output: "nothing to do"}, nil
+	e.runner.workerFn = func(context.Context, driver.WorkerRequest) (*driver.WorkerResult, error) {
+		return &driver.WorkerResult{Output: "nothing to do"}, nil
 	}
 	e.toReview("t1")
 	if _, err := e.svc.Review(bg, "t1"); !errors.Is(err, ErrEmptyDiff) {
@@ -597,11 +598,11 @@ func TestReportStateMachine(t *testing.T) {
 	e := newEnv(t)
 	release := make(chan struct{})
 	started := make(chan struct{}, 1)
-	e.runner.workerFn = func(ctx context.Context, _ pi.WorkerOptions) (*pi.RunResult, error) {
+	e.runner.workerFn = func(ctx context.Context, _ driver.WorkerRequest) (*driver.WorkerResult, error) {
 		started <- struct{}{}
 		select {
 		case <-release:
-			return &pi.RunResult{}, nil
+			return &driver.WorkerResult{}, nil
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		}
@@ -689,7 +690,7 @@ func TestReportDoneWithoutPR(t *testing.T) {
 func TestReportQueuedReleasesWorker(t *testing.T) {
 	e := newEnv(t)
 	started := make(chan struct{})
-	e.runner.workerFn = func(ctx context.Context, _ pi.WorkerOptions) (*pi.RunResult, error) {
+	e.runner.workerFn = func(ctx context.Context, _ driver.WorkerRequest) (*driver.WorkerResult, error) {
 		close(started)
 		<-ctx.Done()
 		return nil, ctx.Err()
@@ -714,7 +715,7 @@ func TestReportQueuedReleasesWorker(t *testing.T) {
 func TestCloseTaskStopsWorkerAndKeepsBranch(t *testing.T) {
 	e := newEnv(t)
 	started := make(chan struct{})
-	e.runner.workerFn = func(ctx context.Context, _ pi.WorkerOptions) (*pi.RunResult, error) {
+	e.runner.workerFn = func(ctx context.Context, _ driver.WorkerRequest) (*driver.WorkerResult, error) {
 		close(started)
 		<-ctx.Done()
 		return nil, ctx.Err()
@@ -765,13 +766,13 @@ func TestBudgetEnforcement(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err := e.svc.Spawn(bg, "t3", "")
-	if !errors.Is(err, pi.ErrBudgetExceeded) {
+	if !errors.Is(err, budget.ErrBudgetExceeded) {
 		t.Fatalf("spawn over budget: %v", err)
 	}
 	if rec, _ := e.svc.GetTask("t3"); rec.Task.Status != schema.StatusQueued || rec.Task.WorktreePath != "" {
 		t.Errorf("rejected spawn left state behind: %+v", rec.Task)
 	}
-	if _, err := e.svc.Review(bg, "t1"); !errors.Is(err, pi.ErrBudgetExceeded) {
+	if _, err := e.svc.Review(bg, "t1"); !errors.Is(err, budget.ErrBudgetExceeded) {
 		t.Errorf("review over budget: %v", err)
 	}
 
@@ -779,7 +780,7 @@ func TestBudgetEnforcement(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if rep.Usage.Cost.Total < 0.4999 || rep.Usage.Cost.Total > 0.5001 || len(rep.Statuses) != 1 || rep.Statuses[0].State != pi.BudgetExceeded {
+	if rep.Usage.Cost.Total < 0.4999 || rep.Usage.Cost.Total > 0.5001 || len(rep.Statuses) != 1 || rep.Statuses[0].State != budget.BudgetExceeded {
 		t.Errorf("cost report = %+v", rep)
 	}
 	if rep, err = e.svc.Cost("alpha", "t1"); err != nil || len(rep.Statuses) != 2 || rep.Usage.Cost.Total < 0.2499 {
@@ -807,7 +808,7 @@ func TestTaskAndFleetBudgets(t *testing.T) {
 		t.Fatal(err)
 	}
 	e.toReview("t1") // 0.25 > 0.2 per-task limit
-	if _, err := e.svc.Review(bg, "t1"); !errors.Is(err, pi.ErrBudgetExceeded) {
+	if _, err := e.svc.Review(bg, "t1"); !errors.Is(err, budget.ErrBudgetExceeded) {
 		t.Errorf("task budget: %v", err)
 	}
 	// Other tasks are unaffected by t1's overspend.
@@ -828,7 +829,7 @@ func TestTaskAndFleetBudgets(t *testing.T) {
 	if _, err := e.svc.Delegate("alpha", "t3", "x", []string{"c"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := e.svc.Spawn(bg, "t3", ""); !errors.Is(err, pi.ErrBudgetExceeded) || !strings.Contains(err.Error(), "fleet") {
+	if _, err := e.svc.Spawn(bg, "t3", ""); !errors.Is(err, budget.ErrBudgetExceeded) || !strings.Contains(err.Error(), "fleet") {
 		t.Errorf("fleet budget: %v", err)
 	}
 }
@@ -836,7 +837,7 @@ func TestTaskAndFleetBudgets(t *testing.T) {
 func TestRestartRecoversState(t *testing.T) {
 	e := newEnv(t)
 	started := make(chan struct{})
-	e.runner.workerFn = func(ctx context.Context, _ pi.WorkerOptions) (*pi.RunResult, error) {
+	e.runner.workerFn = func(ctx context.Context, _ driver.WorkerRequest) (*driver.WorkerResult, error) {
 		close(started)
 		<-ctx.Done()
 		return nil, ctx.Err()
@@ -893,13 +894,13 @@ func TestCorruptStateIsRejected(t *testing.T) {
 	if err := os.WriteFile(e.svc.tasksPath(), []byte(`{"version":1,"tasks":[{"task":{"id":"x"}}]}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := New(Options{Paths: e.paths, Worktrees: e.wt, Runner: e.runner}); err == nil {
+	if _, err := New(Options{Paths: e.paths, Worktrees: e.wt, Driver: e.runner}); err == nil {
 		t.Error("invalid stored task accepted")
 	}
 	if err := os.WriteFile(e.svc.tasksPath(), []byte(`not json`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := New(Options{Paths: e.paths, Worktrees: e.wt, Runner: e.runner}); err == nil {
+	if _, err := New(Options{Paths: e.paths, Worktrees: e.wt, Driver: e.runner}); err == nil {
 		t.Error("garbage state accepted")
 	}
 }

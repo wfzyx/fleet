@@ -16,7 +16,7 @@ import (
 
 	"fleet/pkg/config"
 	"fleet/pkg/integrations"
-	"fleet/pkg/pi"
+	"fleet/pkg/budget"
 )
 
 // The wire protocol is JSON-RPC 2.0 over a Unix domain socket, one JSON
@@ -84,7 +84,7 @@ type rpcNotification struct {
 }
 
 // RPCError is an error returned by the server. Clients can use errors.Is with
-// the service sentinels (ErrNoSuchTask, ErrBusy, pi.ErrBudgetExceeded, ...).
+// the service sentinels (ErrNoSuchTask, ErrBusy, budget.ErrBudgetExceeded, ...).
 type RPCError struct {
 	Code    int    `json:"code"`
 	Message string `json:"message"`
@@ -123,7 +123,7 @@ var sentinels = []struct {
 	{"pr_closed", ErrPRClosed},
 	{"shutdown", ErrShutdown},
 	{"invalid_argument", ErrInvalidArgument},
-	{"budget_exceeded", pi.ErrBudgetExceeded},
+	{"budget_exceeded", budget.ErrBudgetExceeded},
 	{"not_found", integrations.ErrNotFound},
 	{"not_mergeable", integrations.ErrNotMergeable},
 }
@@ -155,7 +155,7 @@ func errorKind(err error) string {
 		return KindNotFound
 	case errors.Is(err, ErrTaskExists), errors.Is(err, ErrSpaceExists):
 		return KindExists
-	case errors.Is(err, pi.ErrBudgetExceeded):
+	case errors.Is(err, budget.ErrBudgetExceeded):
 		return KindBudget
 	case errors.Is(err, ErrBusy), errors.Is(err, ErrSpaceInUse):
 		return KindBusy

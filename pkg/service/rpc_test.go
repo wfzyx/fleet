@@ -14,10 +14,10 @@ import (
 	"testing"
 	"time"
 
-	"fleet/pkg/agent"
 	"fleet/pkg/config"
 	"fleet/pkg/integrations"
-	"fleet/pkg/pi"
+	"fleet/pkg/budget"
+	"fleet/pkg/driver"
 	"fleet/pkg/schema"
 )
 
@@ -288,13 +288,13 @@ func TestRPCErrorsKeepSentinels(t *testing.T) {
 	if err := c.Call(bg, "spaces.budget", SpaceBudgetParams{Space: "alpha", BudgetUpdate: BudgetUpdate{MaxUSD: ptr(0.0)}}, nil); err != nil {
 		t.Fatal(err)
 	}
-	e.runner.workerFn = func(context.Context, pi.WorkerOptions) (*pi.RunResult, error) { return &pi.RunResult{}, nil }
+	e.runner.workerFn = func(context.Context, driver.WorkerRequest) (*driver.WorkerResult, error) { return &driver.WorkerResult{}, nil }
 	// Budget errors cross the wire too.
 	if err := c.Call(bg, "spaces.budget", SpaceBudgetParams{Space: "alpha", BudgetUpdate: BudgetUpdate{MaxUSD: ptr(0.01)}}, nil); err != nil {
 		t.Fatal(err)
 	}
-	e.svc.tracker.Record("alpha", "t1", "worker", &pi.SessionStats{ID: "s", Total: pi.Usage{Cost: pi.Cost{Total: 1}}})
-	if _, err := c.Spawn(bg, "t1", ""); !errors.Is(err, pi.ErrBudgetExceeded) {
+	e.svc.tracker.Record("alpha", "t1", "worker", &budget.SessionStats{ID: "s", Total: budget.Usage{Cost: budget.Cost{Total: 1}}})
+	if _, err := c.Spawn(bg, "t1", ""); !errors.Is(err, budget.ErrBudgetExceeded) {
 		t.Errorf("budget: %v", err)
 	}
 }
@@ -489,7 +489,7 @@ func TestClientContextCancel(t *testing.T) {
 	e := newEnv(t)
 	_, c := startServer(t, e)
 	block := make(chan struct{})
-	e.runner.reviewFn = func(ctx context.Context, _ pi.ReviewerOptions) (*agent.ReviewVerdict, error) {
+	e.runner.reviewFn = func(ctx context.Context, _ driver.ReviewerRequest) (*driver.ReviewerResult, error) {
 		<-block
 		return nil, errors.New("unblocked")
 	}

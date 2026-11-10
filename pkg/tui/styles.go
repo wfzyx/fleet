@@ -7,7 +7,7 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 
-	"fleet/pkg/pi"
+	"fleet/pkg/budget"
 	"fleet/pkg/schema"
 )
 
@@ -129,7 +129,7 @@ func budgetColor(spent, limit float64) lipgloss.TerminalColor {
 		return colorAccent
 	case spent >= limit:
 		return colorDanger
-	case spent >= limit*pi.DefaultWarnRatio:
+	case spent >= limit*budget.DefaultWarnRatio:
 		return colorQueued
 	}
 	return colorDone

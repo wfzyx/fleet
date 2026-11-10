@@ -15,6 +15,8 @@ import (
 	"fleet/pkg/agent"
 	"fleet/pkg/config"
 	"fleet/pkg/git"
+	"fleet/pkg/budget"
+	"fleet/pkg/driver"
 	"fleet/pkg/integrations"
 	"fleet/pkg/pi"
 	"fleet/pkg/schema"
@@ -140,21 +142,95 @@ func (j *fakeJira) list() []string {
 	return append([]string(nil), j.calls...)
 }
 
-// fakeRunner stands in for Pi. By default a worker commits a file in its
+// fakeRunner stands in for an agent driver. By default a worker commits a file in its
 // worktree and records some spend; a reviewer approves.
 type fakeRunner struct {
 	t *testing.T
 
 	mu          sync.Mutex
-	workerFn    func(ctx context.Context, o pi.WorkerOptions) (*pi.RunResult, error)
-	reviewFn    func(ctx context.Context, o pi.ReviewerOptions) (*agent.ReviewVerdict, error)
-	workerCalls []pi.WorkerOptions
-	reviewCalls []pi.ReviewerOptions
+	tracker     *budget.Tracker
+	workerFn    func(ctx context.Context, req driver.WorkerRequest) (*driver.WorkerResult, error)
+	reviewFn    func(ctx context.Context, req driver.ReviewerRequest) (*driver.ReviewerResult, error)
+	leadFn      func(ctx context.Context, req driver.LeadRequest) (driver.LeadSession, error)
+	workerCalls []driver.WorkerRequest
+	reviewCalls []driver.ReviewerRequest
+	leadCalls   []driver.LeadRequest
 	workerCost  float64
 	reviewCost  float64
 }
 
-func (r *fakeRunner) writeSession(o pi.Common, role agent.Role, space, task string, cost float64) {
+func (r *fakeRunner) Name() string { return "fake" }
+
+func (r *fakeRunner) ParseSessions(dir string) ([]*budget.SessionStats, error) {
+	return pi.ParseSessionDir(dir)
+}
+
+type fakeLeadSession struct {
+	mu      sync.Mutex
+	done    chan struct{}
+	answer  func(string) (string, error)
+	prompts []string
+	err     error
+}
+
+func (f *fakeLeadSession) Prompt(ctx context.Context, msg string) (string, error) {
+	f.mu.Lock()
+	f.prompts = append(f.prompts, msg)
+	fn, err := f.answer, f.err
+	f.mu.Unlock()
+	if err != nil {
+		return "", err
+	}
+	if fn != nil {
+		replyCh := make(chan struct {
+			r string
+			e error
+		}, 1)
+		go func() {
+			r, e := fn(msg)
+			replyCh <- struct {
+				r string
+				e error
+			}{r, e}
+		}()
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case res := <-replyCh:
+			return res.r, res.e
+		}
+	}
+	select {
+	case <-ctx.Done():
+		return "", ctx.Err()
+	default:
+		return "re: " + msg, nil
+	}
+}
+
+func (f *fakeLeadSession) Done() <-chan struct{} { return f.done }
+func (f *fakeLeadSession) Abort() error          { return nil }
+func (f *fakeLeadSession) Stop(time.Duration) error {
+	select {
+	case <-f.done:
+	default:
+		close(f.done)
+	}
+	return nil
+}
+
+func (r *fakeRunner) StartLead(ctx context.Context, req driver.LeadRequest) (driver.LeadSession, error) {
+	r.mu.Lock()
+	r.leadCalls = append(r.leadCalls, req)
+	fn := r.leadFn
+	r.mu.Unlock()
+	if fn != nil {
+		return fn(ctx, req)
+	}
+	return &fakeLeadSession{done: make(chan struct{})}, nil
+}
+
+func (r *fakeRunner) writeSession(role agent.Role, space, task string, cost float64) {
 	if cost <= 0 {
 		return
 	}
@@ -174,57 +250,62 @@ func (r *fakeRunner) writeSession(o pi.Common, role agent.Role, space, task stri
 		r.t.Error(err)
 		return
 	}
-	if o.Tracker != nil {
-		if _, err := o.Tracker.IngestDir(space, task, role, dir); err != nil {
-			r.t.Error(err)
+	if r.tracker != nil {
+		sess, err := pi.ParseSessionFile(filepath.Join(dir, "s.jsonl"))
+		if err == nil {
+			_ = r.tracker.Record(space, task, role, sess)
 		}
 	}
 }
 
-func (r *fakeRunner) RunWorker(ctx context.Context, o pi.WorkerOptions) (*pi.RunResult, error) {
+func (r *fakeRunner) RunWorker(ctx context.Context, req driver.WorkerRequest) (*driver.WorkerResult, error) {
 	r.mu.Lock()
-	r.workerCalls = append(r.workerCalls, o)
+	r.workerCalls = append(r.workerCalls, req)
 	fn, cost := r.workerFn, r.workerCost
 	r.mu.Unlock()
-	if o.Common.Tracker != nil {
-		if err := o.Common.Tracker.Enforce(o.Space, o.Task); err != nil {
+	if r.tracker != nil {
+		if err := r.tracker.Enforce(req.Space, req.Task); err != nil {
 			return nil, err
 		}
 	}
 	if fn != nil {
-		return fn(ctx, o)
+		return fn(ctx, req)
 	}
-	file := filepath.Join(o.Worktree, fmt.Sprintf("work-%d.txt", len(r.workerCallsSnapshot())))
+	file := filepath.Join(req.Worktree, fmt.Sprintf("work-%d.txt", len(r.workerCallsSnapshot())))
 	if err := os.WriteFile(file, []byte("change\n"), 0o644); err != nil {
 		return nil, err
 	}
-	gitIn(r.t, o.Worktree, "add", "-A")
-	gitIn(r.t, o.Worktree, "commit", "-q", "-m", "work")
-	r.writeSession(o.Common, agent.RoleWorker, o.Space, o.Task, cost)
-	return &pi.RunResult{Output: "implemented the change", Outcome: agent.OutcomeSucceeded}, nil
+	gitIn(r.t, req.Worktree, "add", "-A")
+	gitIn(r.t, req.Worktree, "commit", "-q", "-m", "work")
+	r.writeSession(agent.RoleWorker, req.Space, req.Task, cost)
+	return &driver.WorkerResult{Output: "implemented the change", Outcome: agent.OutcomeSucceeded}, nil
 }
 
-func (r *fakeRunner) workerCallsSnapshot() []pi.WorkerOptions {
+func (r *fakeRunner) workerCallsSnapshot() []driver.WorkerRequest {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return append([]pi.WorkerOptions(nil), r.workerCalls...)
+	return append([]driver.WorkerRequest(nil), r.workerCalls...)
 }
 
-func (r *fakeRunner) RunReviewer(ctx context.Context, o pi.ReviewerOptions) (*agent.ReviewVerdict, *pi.RunResult, error) {
+func (r *fakeRunner) RunReviewer(ctx context.Context, req driver.ReviewerRequest) (*driver.ReviewerResult, error) {
 	r.mu.Lock()
-	r.reviewCalls = append(r.reviewCalls, o)
+	r.reviewCalls = append(r.reviewCalls, req)
 	fn, cost := r.reviewFn, r.reviewCost
 	r.mu.Unlock()
-	if fn != nil {
-		v, err := fn(ctx, o)
-		return v, &pi.RunResult{}, err
+	if r.tracker != nil {
+		if err := r.tracker.Enforce(req.Space, req.Task); err != nil {
+			return nil, err
+		}
 	}
-	r.writeSession(o.Common, agent.RoleReviewer, o.Space, o.Task, cost)
+	if fn != nil {
+		return fn(ctx, req)
+	}
+	r.writeSession(agent.RoleReviewer, req.Space, req.Task, cost)
 	v := &agent.ReviewVerdict{Verdict: agent.VerdictApprove, Summary: "looks good"}
-	for _, c := range o.Criteria {
+	for _, c := range req.Criteria {
 		v.Criteria = append(v.Criteria, agent.CriterionResult{Criterion: c, Met: true, Evidence: "file.go:1"})
 	}
-	return v, &pi.RunResult{}, nil
+	return &driver.ReviewerResult{Verdict: v, Output: "ok", Outcome: agent.OutcomeSucceeded}, nil
 }
 
 type env struct {
@@ -280,6 +361,7 @@ func newEnv(t *testing.T) *env {
 	e := &env{t: t, paths: paths, repo: repo, gh: &fakeGH{}, jira: &fakeJira{}, runner: &fakeRunner{t: t, workerCost: 0.25, reviewCost: 0.5}}
 	e.wt = &fakeWT{Manager: git.NewManager(paths)}
 	e.svc = e.open()
+	e.runner.tracker = e.svc.tracker
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
@@ -293,7 +375,7 @@ func newEnv(t *testing.T) *env {
 
 func (e *env) open() *Service {
 	e.t.Helper()
-	svc, err := New(Options{Paths: e.paths, GitHub: e.gh, Jira: e.jira, Worktrees: e.wt, Runner: e.runner})
+	svc, err := New(Options{Paths: e.paths, GitHub: e.gh, Jira: e.jira, Worktrees: e.wt, Driver: e.runner})
 	if err != nil {
 		e.t.Fatal(err)
 	}

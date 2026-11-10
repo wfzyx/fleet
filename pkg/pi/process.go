@@ -633,7 +633,7 @@ func runOneShot(ctx context.Context, c Common, cfg agent.Config, role agent.Role
 	if sess, err := ParseSessionDirSum(targets.SessionDir); err == nil {
 		res.Sessions = sess
 		if c.Tracker != nil {
-			_, accountErr = c.Tracker.IngestDir(space, task, role, targets.SessionDir)
+			_, accountErr = IngestDir(c.Tracker, space, task, role, targets.SessionDir)
 		}
 	} else {
 		accountErr = err

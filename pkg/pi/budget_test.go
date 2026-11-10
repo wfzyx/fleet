@@ -191,7 +191,7 @@ func TestBudgetOverridesAndUnlimited(t *testing.T) {
 	if err := tr.Enforce("sp", "normal"); !errors.Is(err, ErrBudgetExceeded) {
 		t.Errorf("SetBudgets ignored: %v", err)
 	}
-	if (Budgets{WarnRatio: 7}).warnRatio() != DefaultWarnRatio {
+	if (Budgets{WarnRatio: 7}).WarnRatioValue() != DefaultWarnRatio {
 		t.Error("out-of-range warn ratio accepted")
 	}
 }
@@ -201,7 +201,7 @@ func TestTrackerIngestDirAndLedgerRoundTrip(t *testing.T) {
 	writeFile(t, filepath.Join(d, "sessions", "a.jsonl"),
 		`{"type":"session","id":"a","timestamp":"2026-01-01T00:00:00Z"}`+"\n"+assistantLine("m1", "2026-01-01T00:01:00Z", "p", "mod", usageJSON(5, 5, 0, 0, 0.4)))
 	tr := NewTracker(Budgets{Task: 1})
-	agg, err := tr.IngestDir("sp", "t", agent.RoleWorker, filepath.Join(d, "sessions"))
+	agg, err := IngestDir(tr, "sp", "t", agent.RoleWorker, filepath.Join(d, "sessions"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -209,14 +209,14 @@ func TestTrackerIngestDirAndLedgerRoundTrip(t *testing.T) {
 		t.Errorf("agg = %+v", agg.Total)
 	}
 	// Ingesting twice must not double count.
-	if _, err := tr.IngestDir("sp", "t", agent.RoleWorker, filepath.Join(d, "sessions")); err != nil {
+	if _, err := IngestDir(tr, "sp", "t", agent.RoleWorker, filepath.Join(d, "sessions")); err != nil {
 		t.Fatal(err)
 	}
 	if got := tr.TaskUsage("sp", "t").Cost.Total; !approx(got, 0.4) {
 		t.Errorf("double counted: %v", got)
 	}
 	// Missing dir is a no-op.
-	if _, err := tr.IngestDir("sp", "t2", agent.RoleWorker, filepath.Join(d, "nope")); err != nil {
+	if _, err := IngestDir(tr, "sp", "t2", agent.RoleWorker, filepath.Join(d, "nope")); err != nil {
 		t.Errorf("missing dir: %v", err)
 	}
 
@@ -235,7 +235,7 @@ func TestTrackerIngestDirAndLedgerRoundTrip(t *testing.T) {
 		t.Errorf("loaded models = %+v", mu)
 	}
 	// Reloaded ledger + re-ingest remains idempotent.
-	if _, err := tr2.IngestDir("sp", "t", agent.RoleWorker, filepath.Join(d, "sessions")); err != nil {
+	if _, err := IngestDir(tr2, "sp", "t", agent.RoleWorker, filepath.Join(d, "sessions")); err != nil {
 		t.Fatal(err)
 	}
 	if got := tr2.TaskUsage("sp", "t").Cost.Total; !approx(got, 0.4) {

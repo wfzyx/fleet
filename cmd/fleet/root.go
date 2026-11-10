@@ -14,6 +14,7 @@ import (
 
 	"fleet/pkg/config"
 	"fleet/pkg/integrations"
+	"fleet/pkg/pi"
 	"fleet/pkg/service"
 	"fleet/pkg/tui"
 )
@@ -135,7 +136,10 @@ func (a *app) startService() (*embedded, error) {
 	if err != nil {
 		return nil, err
 	}
-	opts := service.Options{PiBinary: a.piBin, GitHub: integrations.NewGitHub()}
+	opts := service.Options{
+		GitHub: integrations.NewGitHub(),
+		Driver: pi.NewDriver(pi.DriverOptions{Binary: a.piBin}),
+	}
 	if j, err := integrations.NewJiraFromEnv(); err == nil {
 		opts.Jira = j
 	} else {

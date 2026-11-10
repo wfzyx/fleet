@@ -8,7 +8,7 @@ import (
 
 	"fleet/pkg/agent"
 	"fleet/pkg/config"
-	"fleet/pkg/pi"
+	"fleet/pkg/driver"
 	"fleet/pkg/schema"
 	"fleet/pkg/tui"
 )
@@ -33,7 +33,7 @@ func TestAdapterSpaces(t *testing.T) {
 		t.Fatal(err)
 	}
 	ls := &leadStarter{}
-	e.svc.opts.StartLead = ls.start
+	e.runner.leadFn = ls.start
 	if _, err := e.svc.Chat(bg, "alpha", "hi"); err != nil {
 		t.Fatal(err)
 	}
@@ -119,13 +119,13 @@ func TestAdapterCreateTaskAndDelegate(t *testing.T) {
 func TestAdapterRequestReview(t *testing.T) {
 	e := newEnv(t)
 	release := make(chan struct{})
-	e.runner.workerFn = func(ctx context.Context, o pi.WorkerOptions) (*pi.RunResult, error) {
-		gitIn(e.t, o.Worktree, "commit", "-q", "--allow-empty", "-m", "x")
+	e.runner.workerFn = func(ctx context.Context, req driver.WorkerRequest) (*driver.WorkerResult, error) {
+		gitIn(e.t, req.Worktree, "commit", "-q", "--allow-empty", "-m", "x")
 		select {
 		case <-release:
 		case <-ctx.Done():
 		}
-		return &pi.RunResult{Output: "done", Outcome: agent.OutcomeSucceeded}, nil
+		return &driver.WorkerResult{Output: "done", Outcome: agent.OutcomeSucceeded}, nil
 	}
 	t.Cleanup(func() { close(release) })
 
@@ -190,7 +190,7 @@ func TestAdapterApprove(t *testing.T) {
 func TestAdapterServiceOperations(t *testing.T) {
 	e := newEnv(t)
 	ls := &leadStarter{}
-	e.svc.opts.StartLead = ls.start
+	e.runner.leadFn = ls.start
 	for name, a := range adapters(t, e) {
 		id := "op-" + name
 		if _, err := a.DelegateTask(bg, DelegateParams{Space: "alpha", Task: id, Brief: "b", Criteria: []string{"c"}}); err != nil {

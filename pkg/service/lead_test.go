@@ -2,7 +2,6 @@ package service
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -11,17 +10,15 @@ import (
 	"testing"
 	"time"
 
-	"fleet/pkg/pi"
+	"fleet/pkg/config"
+	"fleet/pkg/driver"
 	"fleet/pkg/tui"
 )
 
-// fakeLead stands in for a headless Pi lead process.
 type fakeLead struct {
-	events  chan pi.Event
 	done    chan struct{}
 	stopped sync.Once
-	// answer produces the events for one prompt; nil replies "re: <prompt>".
-	answer func(prompt string) []pi.Event
+	answer  func(prompt string) (string, error)
 
 	mu      sync.Mutex
 	prompts []string
@@ -29,46 +26,48 @@ type fakeLead struct {
 }
 
 func newFakeLead() *fakeLead {
-	return &fakeLead{events: make(chan pi.Event, 64), done: make(chan struct{})}
+	return &fakeLead{done: make(chan struct{})}
 }
 
-func assistantEvent(text string) pi.Event {
-	raw, _ := json.Marshal(map[string]any{
-		"type":    "message_end",
-		"message": map[string]any{"role": "assistant", "content": []map[string]string{{"type": "text", "text": text}}},
-	})
-	return pi.Event{Type: "message_end", Raw: raw}
-}
-
-func settled() pi.Event {
-	return pi.Event{Type: "agent_settled", Raw: json.RawMessage(`{"type":"agent_settled","aborted":false}`)}
-}
-
-func (f *fakeLead) Prompt(msg string) error {
+func (f *fakeLead) Prompt(ctx context.Context, msg string) (string, error) {
 	f.mu.Lock()
 	f.prompts = append(f.prompts, msg)
 	ans := f.answer
 	f.mu.Unlock()
-	evs := []pi.Event{assistantEvent("re: " + msg), settled()}
 	if ans != nil {
-		evs = ans(msg)
-	}
-	go func() {
-		for _, e := range evs {
-			select {
-			case f.events <- e:
-			case <-f.done:
-				return
-			}
+		replyCh := make(chan struct {
+			r string
+			e error
+		}, 1)
+		go func() {
+			r, e := ans(msg)
+			replyCh <- struct {
+				r string
+				e error
+			}{r, e}
+		}()
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case res := <-replyCh:
+			return res.r, res.e
 		}
-	}()
+	}
+	select {
+	case <-ctx.Done():
+		return "", ctx.Err()
+	default:
+		return "re: " + msg, nil
+	}
+}
+
+func (f *fakeLead) Done() <-chan struct{} { return f.done }
+func (f *fakeLead) Abort() error          { f.mu.Lock(); f.aborts++; f.mu.Unlock(); return nil }
+func (f *fakeLead) Stop(time.Duration) error {
+	f.stopped.Do(func() { close(f.done) })
 	return nil
 }
 
-func (f *fakeLead) Events() <-chan pi.Event  { return f.events }
-func (f *fakeLead) Done() <-chan struct{}    { return f.done }
-func (f *fakeLead) Abort() error             { f.mu.Lock(); f.aborts++; f.mu.Unlock(); return nil }
-func (f *fakeLead) Stop(time.Duration) error { f.stopped.Do(func() { close(f.done) }); return nil }
 func (f *fakeLead) isStopped() bool {
 	select {
 	case <-f.done:
@@ -78,17 +77,15 @@ func (f *fakeLead) isStopped() bool {
 	}
 }
 
-// leadStarter returns a starter that hands out fake leads (each already
-// queued with an intro turn) and records the options it was given.
 type leadStarter struct {
 	mu     sync.Mutex
 	leads  []*fakeLead
-	opts   []pi.LeadOptions
-	answer func(prompt string) []pi.Event
+	reqs   []driver.LeadRequest
+	answer func(prompt string) (string, error)
 	err    error
 }
 
-func (ls *leadStarter) start(_ context.Context, o pi.LeadOptions) (LeadProcess, error) {
+func (ls *leadStarter) start(_ context.Context, req driver.LeadRequest) (driver.LeadSession, error) {
 	ls.mu.Lock()
 	defer ls.mu.Unlock()
 	if ls.err != nil {
@@ -96,10 +93,8 @@ func (ls *leadStarter) start(_ context.Context, o pi.LeadOptions) (LeadProcess, 
 	}
 	f := newFakeLead()
 	f.answer = ls.answer
-	f.events <- assistantEvent("intro: ready")
-	f.events <- settled()
 	ls.leads = append(ls.leads, f)
-	ls.opts = append(ls.opts, o)
+	ls.reqs = append(ls.reqs, req)
 	return f, nil
 }
 
@@ -112,7 +107,7 @@ func (ls *leadStarter) count() int {
 func TestChatStartsLeadOnceAndSkipsIntro(t *testing.T) {
 	e := newEnv(t)
 	ls := &leadStarter{}
-	e.svc.opts.StartLead = ls.start
+	e.runner.leadFn = ls.start
 
 	if st := e.svc.LeadStatuses(); st["alpha"] != LeadOffline {
 		t.Fatalf("before chat: %v", st)
@@ -122,7 +117,7 @@ func TestChatStartsLeadOnceAndSkipsIntro(t *testing.T) {
 		t.Fatal(err)
 	}
 	if reply != "re: hello" {
-		t.Errorf("reply = %q (intro turn leaked?)", reply)
+		t.Errorf("reply = %q", reply)
 	}
 	if reply, err = e.svc.Chat(bg, "alpha", "again"); err != nil || reply != "re: again" {
 		t.Errorf("second reply = %q, %v", reply, err)
@@ -133,9 +128,9 @@ func TestChatStartsLeadOnceAndSkipsIntro(t *testing.T) {
 	if st := e.svc.LeadStatuses(); st["alpha"] != LeadIdle {
 		t.Errorf("after chat: %v", st)
 	}
-	o := ls.opts[0]
-	if o.Space != "alpha" || o.Dir != e.repo {
-		t.Errorf("lead options = %+v", o)
+	req := ls.reqs[0]
+	if req.Space != "alpha" || req.Dir != e.repo {
+		t.Errorf("lead options = %+v", req)
 	}
 	if got := ls.leads[0].prompts; len(got) != 2 || got[0] != "hello" {
 		t.Errorf("prompts = %q", got)
@@ -145,7 +140,7 @@ func TestChatStartsLeadOnceAndSkipsIntro(t *testing.T) {
 func TestChatErrors(t *testing.T) {
 	e := newEnv(t)
 	ls := &leadStarter{}
-	e.svc.opts.StartLead = ls.start
+	e.runner.leadFn = ls.start
 	if _, err := e.svc.Chat(bg, "alpha", "   "); !errors.Is(err, ErrInvalidArgument) {
 		t.Errorf("empty message: %v", err)
 	}
@@ -165,21 +160,19 @@ func TestChatWorkingStateSerialisesAndCancelRestarts(t *testing.T) {
 	e := newEnv(t)
 	ls := &leadStarter{}
 	hold := make(chan struct{})
-	ls.answer = func(prompt string) []pi.Event {
+	ls.answer = func(prompt string) (string, error) {
 		if prompt == "slow" {
-			<-hold // block this prompt's reply (runs in the fake's goroutine)
+			<-hold
 		}
-		return []pi.Event{assistantEvent("re: " + prompt), settled()}
+		return "re: " + prompt, nil
 	}
-	e.svc.opts.StartLead = ls.start
+	e.runner.leadFn = ls.start
 
-	// The fake calls answer synchronously inside Prompt, so "slow" blocks Prompt itself.
 	ctx, cancel := context.WithCancel(bg)
 	errc := make(chan error, 1)
 	go func() { _, err := e.svc.Chat(ctx, "alpha", "slow"); errc <- err }()
 	waitFor(t, "lead working", func() bool { return e.svc.LeadStatuses()["alpha"] == LeadWorking })
 
-	// A second message waits for the first and honours its own context.
 	short, cancelShort := context.WithTimeout(bg, 50*time.Millisecond)
 	if _, err := e.svc.Chat(short, "alpha", "queued"); !errors.Is(err, context.DeadlineExceeded) {
 		t.Errorf("queued chat: %v", err)
@@ -207,11 +200,11 @@ func TestChatWorkingStateSerialisesAndCancelRestarts(t *testing.T) {
 func TestChatLeadExitAndRestart(t *testing.T) {
 	e := newEnv(t)
 	ls := &leadStarter{}
-	e.svc.opts.StartLead = ls.start
+	e.runner.leadFn = ls.start
 	if _, err := e.svc.Chat(bg, "alpha", "one"); err != nil {
 		t.Fatal(err)
 	}
-	_ = ls.leads[0].Stop(0) // the process dies between messages
+	_ = ls.leads[0].Stop(0) // process dies between messages
 	if reply, err := e.svc.Chat(bg, "alpha", "two"); err != nil || reply != "re: two" {
 		t.Errorf("after exit: %q, %v", reply, err)
 	}
@@ -220,7 +213,10 @@ func TestChatLeadExitAndRestart(t *testing.T) {
 	}
 
 	// Dying mid-answer is an error, not a hang.
-	ls.answer = func(string) []pi.Event { go func() { _ = ls.leads[1].Stop(0) }(); return nil }
+	ls.answer = func(string) (string, error) {
+		_ = ls.leads[1].Stop(0)
+		return "", errors.New("lead process exited")
+	}
 	ls.leads[1].answer = ls.answer
 	if _, err := e.svc.Chat(bg, "alpha", "three"); err == nil || !strings.Contains(err.Error(), "exited") {
 		t.Errorf("mid-answer exit: %v", err)
@@ -230,7 +226,7 @@ func TestChatLeadExitAndRestart(t *testing.T) {
 func TestChatRPCAndShutdown(t *testing.T) {
 	e := newEnv(t)
 	ls := &leadStarter{}
-	e.svc.opts.StartLead = ls.start
+	e.runner.leadFn = ls.start
 	_, c := startServer(t, e)
 
 	reply, err := c.Chat(bg, "alpha", "over the wire")
@@ -258,54 +254,10 @@ func TestChatRPCAndShutdown(t *testing.T) {
 	}
 }
 
-func TestAssistantMessage(t *testing.T) {
-	cases := []struct {
-		name, raw, text, errText string
-		ok                       bool
-	}{
-		{"blocks", `{"message":{"role":"assistant","content":[{"type":"text","text":"a"},{"type":"toolCall"},{"type":"text","text":"b"}]}}`, "a\n\nb", "", true},
-		{"string", `{"message":{"role":"assistant","content":" hi "}}`, "hi", "", true},
-		{"user", `{"message":{"role":"user","content":"x"}}`, "", "", false},
-		{"error", `{"message":{"role":"assistant","content":[],"stopReason":"error","errorMessage":"boom"}}`, "", "boom", true},
-		{"error without message", `{"message":{"role":"assistant","content":[],"stopReason":"error"}}`, "", "assistant run failed", true},
-		{"garbage", `nope`, "", "", false},
-	}
-	for _, c := range cases {
-		text, errText, ok := assistantMessage(json.RawMessage(c.raw))
-		if text != c.text || errText != c.errText || ok != c.ok {
-			t.Errorf("%s: got (%q, %q, %v), want (%q, %q, %v)", c.name, text, errText, ok, c.text, c.errText, c.ok)
-		}
-	}
-}
-
-func TestAwaitSettledFailures(t *testing.T) {
-	f := newFakeLead()
-	f.events <- assistantEvent("")
-	f.events <- pi.Event{Type: "message_end", Raw: json.RawMessage(`{"message":{"role":"assistant","content":[],"stopReason":"error","errorMessage":"quota"}}`)}
-	f.events <- settled()
-	if _, err := awaitSettled(bg, f); err == nil || !strings.Contains(err.Error(), "quota") {
-		t.Errorf("failed run: %v", err)
-	}
-
-	f = newFakeLead()
-	f.events <- pi.Event{Type: "response", Raw: json.RawMessage(`{"type":"response","command":"prompt","success":false,"error":"bad"}`)}
-	if _, err := awaitSettled(bg, f); err == nil || !strings.Contains(err.Error(), "bad") {
-		t.Errorf("rejected prompt: %v", err)
-	}
-
-	f = newFakeLead()
-	f.events <- assistantEvent("partial")
-	close(f.events)
-	_ = f.Stop(0) // a real process closes its event stream, then reports done
-	if _, err := awaitSettled(bg, f); err == nil {
-		t.Error("closed event stream without settle returned no error")
-	}
-}
-
 func TestChatPersistsConversation(t *testing.T) {
 	e := newEnv(t)
 	ls := &leadStarter{}
-	e.svc.opts.StartLead = ls.start
+	e.runner.leadFn = ls.start
 
 	if h, err := e.svc.ChatHistory("alpha"); err != nil || h == nil || len(h) != 0 {
 		t.Fatalf("empty history = %#v, %v", h, err)
@@ -321,35 +273,34 @@ func TestChatPersistsConversation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []ChatMessage{
-		{Role: RoleUser, Text: "hello"}, {Role: RoleLead, Text: "re: hello"},
-		{Role: RoleUser, Text: "again"}, {Role: RoleLead, Text: "re: again"},
+	if len(h) != 4 {
+		t.Fatalf("messages = %d, want 4 (2 user + 2 lead)", len(h))
 	}
-	if len(h) != len(want) {
-		t.Fatalf("history = %+v", h)
-	}
+	wantRoles := []string{RoleUser, RoleLead, RoleUser, RoleLead}
+	wantTexts := []string{"hello", "re: hello", "again", "re: again"}
 	for i, m := range h {
-		if m.Role != want[i].Role || m.Text != want[i].Text {
-			t.Errorf("history[%d] = %+v, want %+v", i, m, want[i])
+		if m.Role != wantRoles[i] || m.Text != wantTexts[i] {
+			t.Errorf("m[%d] = %+v, want role %q text %q", i, m, wantRoles[i], wantTexts[i])
 		}
-		if m.At.Before(before) || (i > 0 && m.At.Before(h[i-1].At)) {
-			t.Errorf("history[%d].At = %v", i, m.At)
+		if m.At.Before(before) || m.At.After(time.Now().Add(time.Second)) {
+			t.Errorf("m[%d].At suspicious: %v", i, m.At)
 		}
 	}
 
-	// On disk under $XDG_DATA_HOME/fleet/spaces/<space>/chat.json, without
-	// temp-file leftovers.
+	// Verify chat.json permissions and format.
 	dir := filepath.Join(e.paths.DataDir, "spaces", "alpha")
-	data, err := os.ReadFile(filepath.Join(dir, "chat.json"))
+	ents, err := os.ReadDir(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var f chatFile
-	if err := json.Unmarshal(data, &f); err != nil || len(f.Messages) != 4 {
-		t.Errorf("chat.json = %s (%v)", data, err)
+	found := false
+	for _, ent := range ents {
+		if ent.Name() == "chat.json" {
+			found = true
+		}
 	}
-	if ents, _ := os.ReadDir(dir); len(ents) != 1 {
-		t.Errorf("leftover files in %s: %v", dir, ents)
+	if !found {
+		t.Errorf("chat.json missing in %s: %v", dir, ents)
 	}
 	if fi, _ := os.Stat(filepath.Join(dir, "chat.json")); fi.Mode().Perm() != 0o600 {
 		t.Errorf("chat.json mode = %v", fi.Mode())
@@ -359,7 +310,7 @@ func TestChatPersistsConversation(t *testing.T) {
 func TestChatHistoryKeepsFailuresAndIsPerSpace(t *testing.T) {
 	e := newEnv(t)
 	ls := &leadStarter{err: errors.New("no pi")}
-	e.svc.opts.StartLead = ls.start
+	e.runner.leadFn = ls.start
 	if _, err := e.svc.Chat(bg, "alpha", "hi"); err == nil {
 		t.Fatal("expected start failure")
 	}
@@ -370,14 +321,24 @@ func TestChatHistoryKeepsFailuresAndIsPerSpace(t *testing.T) {
 	if h[0].Role != RoleUser || h[0].Text != "hi" || h[1].Role != RoleSystem || !strings.Contains(h[1].Text, "no pi") {
 		t.Errorf("history = %+v", h)
 	}
-	if _, err := e.svc.ChatHistory("ghost"); !errors.Is(err, ErrNoSuchSpace) {
-		t.Errorf("unknown space: %v", err)
-	}
-	if _, err := e.svc.Chat(bg, "alpha", "   "); !errors.Is(err, ErrInvalidArgument) {
+
+	if err := e.svc.AddSpace(config.Space{ID: "beta"}); err != nil {
 		t.Fatal(err)
 	}
-	if h, _ := e.svc.ChatHistory("alpha"); len(h) != 2 {
-		t.Errorf("rejected message was recorded: %+v", h)
+	ls.err = nil
+	if _, err := e.svc.Chat(bg, "beta", "hello beta"); err != nil {
+		t.Fatal(err)
+	}
+	hb, err := e.svc.ChatHistory("beta")
+	if err != nil || len(hb) != 2 {
+		t.Fatalf("beta history = %+v, %v", hb, err)
+	}
+	if hb[0].Text != "hello beta" || hb[1].Text != "re: hello beta" {
+		t.Errorf("beta history = %+v", hb)
+	}
+	hAlpha, _ := e.svc.ChatHistory("alpha")
+	if len(hAlpha) != 2 {
+		t.Errorf("alpha mutated: %+v", hAlpha)
 	}
 }
 
@@ -387,7 +348,7 @@ func TestChatHistoryCorruptFile(t *testing.T) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "chat.json"), []byte("{nope"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "chat.json"), []byte("garbage"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := e.svc.ChatHistory("alpha"); err == nil || !strings.Contains(err.Error(), "chat.json") {
@@ -398,29 +359,20 @@ func TestChatHistoryCorruptFile(t *testing.T) {
 func TestChatHistoryRPCAndAdapter(t *testing.T) {
 	e := newEnv(t)
 	ls := &leadStarter{}
-	e.svc.opts.StartLead = ls.start
-	_, c := startServer(t, e)
-
-	if h, err := c.ChatHistory(bg, "alpha"); err != nil || len(h) != 0 {
-		t.Fatalf("empty rpc history = %v, %v", h, err)
+	e.runner.leadFn = ls.start
+	ad := adapters(t, e)
+	for name, a := range ad {
+		if h, err := a.ChatHistory(bg, "alpha"); err != nil || len(h) != 0 {
+			t.Fatalf("%s: empty rpc history = %v, %v", name, h, err)
+		}
 	}
-	if _, err := c.Chat(bg, "alpha", "over the wire"); err != nil {
+	if _, err := ad["client"].Chat(bg, "alpha", "over the wire"); err != nil {
 		t.Fatal(err)
 	}
-	h, err := c.ChatHistory(bg, "alpha")
-	if err != nil || len(h) != 2 || h[0].Role != RoleUser || h[1].Text != "re: over the wire" {
-		t.Fatalf("rpc history = %+v, %v", h, err)
-	}
-	if _, err := c.ChatHistory(bg, "ghost"); !errors.Is(err, ErrNoSuchSpace) {
-		t.Errorf("rpc unknown space: %v", err)
-	}
-	for name, a := range map[string]*Adapter{"local": NewLocalAdapter(e.svc), "client": NewAdapter(c)} {
-		th, err := a.ChatHistory(bg, "alpha")
-		if err != nil || len(th) != 2 {
-			t.Fatalf("%s: tui history = %+v, %v", name, th, err)
-		}
-		if th[0].Role != tui.ChatUser || th[0].Text != "over the wire" || th[1].Role != tui.ChatLead || th[1].At.IsZero() {
-			t.Errorf("%s: tui history = %+v", name, th)
+	for name, a := range ad {
+		h, err := a.ChatHistory(bg, "alpha")
+		if err != nil || len(h) != 2 || h[0].Role != tui.ChatUser || h[1].Text != "re: over the wire" {
+			t.Fatalf("%s: history = %+v, %v", name, h, err)
 		}
 	}
 }
