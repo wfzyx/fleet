@@ -26,6 +26,11 @@ type Driver struct {
 	opts DriverOptions
 }
 
+var (
+	_ driver.Driver        = (*Driver)(nil)
+	_ driver.SessionParser = (*Driver)(nil)
+)
+
 // NewDriver returns a new Pi driver.
 func NewDriver(opts DriverOptions) *Driver {
 	return &Driver{opts: opts}
