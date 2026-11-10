@@ -457,6 +457,9 @@ type ReviewerOptions struct {
 	// agent.WorktreeDir(space, task) when that exists, else the process's cwd.
 	Worktree   string
 	SessionDir string
+	// SkillPath overrides the directory containing SKILL.md. When empty,
+	// agent.EnsureReviewerSkill materialises the embedded reviewer skill.
+	SkillPath string
 }
 
 // BuildReviewerCommand resolves the one-shot reviewer invocation. The review
@@ -496,8 +499,14 @@ func BuildReviewerCommand(o ReviewerOptions) (Command, agent.Targets, error) {
 	if err != nil {
 		return Command{}, agent.Targets{}, err
 	}
+	skill := o.SkillPath
+	if skill == "" {
+		if skill, err = agent.EnsureReviewerSkill(); err != nil {
+			return Command{}, agent.Targets{}, err
+		}
+	}
 	args := baseArgs(o.Common, cfg, sessionDir, joinPrompt(agent.ReviewerSystemPrompt, repo))
-	args = append(args, "--print", "--mode", "text", "--name", "review:"+o.Space+"/"+o.Task,
+	args = append(args, "--skill", skill, "--print", "--mode", "text", "--name", "review:"+o.Space+"/"+o.Task,
 		"--", "Review the change described above and reply with the JSON verdict only.")
 	return Command{
 		Path: o.binary(), Args: args, Dir: dir, Stdin: prompt,

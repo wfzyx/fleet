@@ -208,11 +208,14 @@ func (cs Configs) Validate() error {
 	return nil
 }
 
-//go:embed skills/fleet-lead/SKILL.md
+//go:embed skills/fleet-lead/SKILL.md skills/fleet-reviewer/SKILL.md
 var skillFS embed.FS
 
 // LeadSkillName is the name of the skill every lead loads.
 const LeadSkillName = "fleet-lead"
+
+// ReviewerSkillName is the name of the skill reviewers load.
+const ReviewerSkillName = "fleet-reviewer"
 
 // LeadSkillContent returns the embedded fleet-lead skill.
 func LeadSkillContent() string {
@@ -223,20 +226,39 @@ func LeadSkillContent() string {
 	return string(b)
 }
 
+// ReviewerSkillContent returns the embedded fleet-reviewer skill.
+func ReviewerSkillContent() string {
+	b, err := skillFS.ReadFile("skills/fleet-reviewer/SKILL.md")
+	if err != nil { // embedded at build time; cannot happen
+		panic(err)
+	}
+	return string(b)
+}
+
 // EnsureLeadSkill materialises the embedded fleet-lead skill under
 // $XDG_DATA_HOME/fleet/skills/fleet-lead and returns that directory. The file
 // is only rewritten when its content differs.
 func EnsureLeadSkill() (string, error) {
+	return ensureSkill(LeadSkillName, LeadSkillContent())
+}
+
+// EnsureReviewerSkill materialises the embedded fleet-reviewer skill under
+// $XDG_DATA_HOME/fleet/skills/fleet-reviewer and returns that directory. The file
+// is only rewritten when its content differs.
+func EnsureReviewerSkill() (string, error) {
+	return ensureSkill(ReviewerSkillName, ReviewerSkillContent())
+}
+
+func ensureSkill(name, want string) (string, error) {
 	root, err := SkillsDir()
 	if err != nil {
 		return "", err
 	}
-	dir := filepath.Join(root, LeadSkillName)
+	dir := filepath.Join(root, name)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", fmt.Errorf("agent: create skill dir: %w", err)
 	}
 	file := filepath.Join(dir, "SKILL.md")
-	want := LeadSkillContent()
 	if cur, err := os.ReadFile(file); err == nil && string(cur) == want {
 		return dir, nil
 	}

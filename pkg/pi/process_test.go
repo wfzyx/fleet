@@ -484,6 +484,9 @@ func TestBuildReviewerCommand(t *testing.T) {
 	if got := flagValue(t, a, "--tools"); got != "read,grep,find,ls" {
 		t.Errorf("tools = %q", got)
 	}
+	if !strings.Contains(flagValue(t, a, "--skill"), agent.ReviewerSkillName) {
+		t.Errorf("skill = %q, want containing %s", flagValue(t, a, "--skill"), agent.ReviewerSkillName)
+	}
 	for _, flag := range []string{"--no-extensions", "--no-skills", "--no-context-files", "--no-mcp", "--print"} {
 		if !hasFlag(a, flag) {
 			t.Errorf("missing %s", flag)

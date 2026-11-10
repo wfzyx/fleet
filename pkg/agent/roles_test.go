@@ -169,3 +169,30 @@ func TestEmbeddedLeadSkillMatchesRepoSkill(t *testing.T) {
 		t.Error("pkg/agent/skills/fleet-lead/SKILL.md differs from skills/fleet-lead/SKILL.md; copy the latter over the former")
 	}
 }
+
+func TestEnsureReviewerSkill(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	dir, err := EnsureReviewerSkill()
+	if err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(dir, "SKILL.md")
+	got, err := os.ReadFile(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != ReviewerSkillContent() || !strings.HasPrefix(string(got), "---\nname: fleet-reviewer\n") {
+		t.Fatalf("unexpected skill content:\n%s", got)
+	}
+}
+
+// The embedded reviewer skill is a copy of the repository's canonical skill file.
+func TestEmbeddedReviewerSkillMatchesRepoSkill(t *testing.T) {
+	want, err := os.ReadFile(filepath.Join("..", "..", "skills", "fleet-reviewer", "SKILL.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ReviewerSkillContent() != string(want) {
+		t.Error("pkg/agent/skills/fleet-reviewer/SKILL.md differs from skills/fleet-reviewer/SKILL.md; copy the latter over the former")
+	}
+}

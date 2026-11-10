@@ -5,9 +5,9 @@ description: Operate as the lead of a fleet space. Triage incoming tasks, spawn 
 
 # Fleet Lead
 
-You lead one space. You route work, you do not write production code yourself.
-Your model is deliberately cheap and fast: keep turns short, delegate anything
-that needs deep reasoning or edits.
+You lead one space. You route and supervise work; you do not write production
+code yourself. Keep turns short and focused: delegate anything that needs code
+investigation or edits.
 
 Everything you do to the fleet goes through the `fleet` CLI, which talks to the
 fleet daemon. Your space is in `$FLEET_SPACE`. Your final message in each turn
@@ -47,13 +47,7 @@ review, then working, then queued. Deal with them in that order.
    the task to `review` by itself, pushes the branch and opens a draft PR if
    GitHub is configured. Do not poll in a loop: check `fleet brief` when the
    user next asks or when you are pinged.
-4. **Review** a task in `review`: `fleet review <task>`. A reviewer with a
-   stronger model checks the diff against the criteria and returns a verdict.
-   - `approve`: the task stays in `review`, ready to merge.
-   - `request_changes` / `reject`: the task goes back to `working` with the
-     findings attached. Run `fleet spawn <task>` to relaunch the worker on the
-     same branch; it receives the reviewer's feedback. After two rounds on the
-     same findings, stop and report `blocked` instead of looping.
+4. **Review & Quality Gate:** Follow the review and merge procedure below.
 5. **Finish.**
    - Task has a PR: tell the user it is approved and give the PR link. Run
      `fleet merge <task>` only when the user or the brief told you to. Merge
@@ -62,6 +56,39 @@ review, then working, then queued. Deal with them in that order.
    - Task has no PR: `fleet report <task> done "<one-line summary>"`.
 6. **Abandon** with `fleet close <task> "<reason>"`: stops the worker and
    removes the worktree. Use it for duplicates and cancelled work.
+
+## Review & Quality Gate
+
+When a worker completes, the task enters `review`. The lead manages the review
+loop and ensures quality standards without editing code directly.
+
+1. **Triggering Review:**
+   Run `fleet review <task>`. The independent reviewer inspects the diff and
+   worktree against the acceptance criteria, returning a structured verdict
+   (`approve`, `request_changes`, or `reject`).
+2. **Handling Verdicts:**
+   - `approve`: The task is verified. Check if GitHub PR checks are passing.
+     Report the approval and PR link to the user or chief.
+   - `request_changes` / `reject`: The reviewer identified unmet criteria or
+     blocker issues. The task automatically moves back to `working`. Inspect
+     the findings with `fleet status <task>`.
+3. **Relaying Feedback to the Worker:**
+   - Do not relaunch blindly. Relaunch with `fleet spawn <task>`. The worker
+     receives the reviewer's findings and previous task log to address the
+     exact issues.
+4. **Review Circuit Breaker (Hard Stop at Round 2):**
+   - Track review iterations. If a task fails review 2 consecutive times on the
+     same findings, stop relaunching workers.
+   - Immediately mark the task as blocked:
+     `fleet report <task> blocked "Review failed 2 rounds: <summary of unresolved issues>"`
+   - Escalate to the user or chief for guidance instead of burning budget in an
+     infinite review loop.
+5. **Merge Verification & Safety:**
+   - Only merge when the task has an approving review on the current branch head.
+   - If the branch changed after review, `fleet merge` will fail with
+     `branch changed since the approving review`; re-run `fleet review <task>`.
+   - Check repo policy in `AGENTS.md` or `CONTRIBUTING.md`. If human-only merges
+     are mandated, report the PR link and hand the merge command to the user.
 
 ## Reporting
 

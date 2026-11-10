@@ -27,7 +27,7 @@
        ┌───────────────────────┼───────────────────────┐
        ▼                       ▼                       ▼
   Lead Agent             Worker Agents           Reviewer Agent
- (Fast/Haiku)          (Sonnet/Ephemeral)         (Opus/Reasoning)
+ (Coordinator)          (Implementation)        (Quality Gatekeeper)
  Persistent chat,      Isolated XDG worktrees,    Validates criteria,
  coordinates scope,     zero context bleed,      diff review gatekeeper,
  never touches code.    does work & exits.       authorizes PR merges.
@@ -35,18 +35,15 @@
 
 ### The 3-Tier Agent Model
 
-1. **Space Lead (1 per Space / Company):**
+1. **Space Lead (1 per Space / Scope):**
    - **Role:** High-availability coordinator and conversational manager.
-   - **Model:** Fast, cost-efficient model (e.g. `haiku-5-5`, `gemini-flash`).
-   - **Invariants:** Answers questions instantly, triages issues, delegates tasks. **Never edits code or touches worktrees directly.**
+   - **Invariants:** Answers questions about the project, triages issues, delegates tasks, and supervises workers. **Never edits code or touches worktrees directly.**
 2. **Workers (Multiple, Ephemeral):**
    - **Role:** Implementation contributors.
-   - **Model:** Medium coding tier (e.g. `sonnet-5-5`).
-   - **Invariants:** Spawned into isolated Git worktrees under `$XDG_DATA_HOME/fleet/worktrees/`. Ephemeral execution: no context bleed, no personal memory/dream inheritance. Focuses solely on the task brief and repo `AGENTS.md`, reports review, and terminates.
+   - **Invariants:** Spawned into isolated Git worktrees under `$XDG_DATA_HOME/fleet/worktrees/`. Ephemeral execution: no context bleed, no personal memory/dream inheritance. Focuses solely on the task brief, acceptance criteria, and repo `AGENTS.md`, finishes, and exits.
 3. **Reviewer (Gatekeeper):**
    - **Role:** Acceptance criteria auditor and merge gatekeeper.
-   - **Model:** Deep reasoning model (e.g. `claude-opus-5-5`).
-   - **Invariants:** Receives acceptance criteria and unified git diff over stdin. Validates criteria point-by-point and outputs a structured `ReviewVerdict` (approved vs changes requested). Blocks pull request merging until criteria pass.
+   - **Invariants:** Read-only inspection (`read`, `grep`, `find`, `ls`). Receives acceptance criteria and unified git diff over stdin. Validates criteria point-by-point, audits concurrency and resource safety, and outputs a structured `ReviewVerdict` (approved vs changes requested). Blocks pull request merging until criteria pass.
 
 ---
 
