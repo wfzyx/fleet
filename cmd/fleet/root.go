@@ -60,6 +60,7 @@ the service in-process (and serves the socket while it is open).`,
 		a.closeCmd(),
 		a.pingCmd(),
 		a.costCmd(),
+		a.notifyCmd(),
 	)
 	return root
 }

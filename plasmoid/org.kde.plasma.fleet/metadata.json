@@ -1,0 +1,24 @@
+{
+    "KPackageStructure": "Plasma/Applet",
+    "KPlugin": {
+        "Authors": [
+            {
+                "Email": "5880370+wfzyx@users.noreply.github.com",
+                "Name": "Victor Hugo"
+            }
+        ],
+        "Category": "Development",
+        "Description": "Fleet agent orchestration and task cockpit for KDE Plasma",
+        "Icon": "applications-development",
+        "Id": "org.kde.plasma.fleet",
+        "License": "AGPL-3.0",
+        "Name": "Fleet",
+        "Version": "1.0",
+        "Website": "https://github.com/wfzyx/fleet"
+    },
+    "X-Plasma-API": "declarativeappletscript",
+    "X-Plasma-API-Minimum-Version": "6.0",
+    "X-Plasma-MainScript": "ui/main.qml",
+    "X-Plasma-NotificationArea": "true",
+    "X-Plasma-NotificationAreaCategory": "ApplicationStatus"
+}
