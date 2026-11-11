@@ -45,8 +45,9 @@ PlasmoidItem {
         let parts = [];
         if (fleetStatus.working_count > 0) parts.push(fleetStatus.working_count + " working");
         if (fleetStatus.review_count > 0) parts.push(fleetStatus.review_count + " review");
+        let schedCount = fleetStatus.schedules ? fleetStatus.schedules.length : 0;
+        if (schedCount > 0) parts.push(schedCount + " scheduled");
         if (parts.length === 0) parts.push("idle");
-        parts.push("$" + (fleetStatus.total_spend_usd || 0).toFixed(2));
         return parts.join(" • ");
     }
 

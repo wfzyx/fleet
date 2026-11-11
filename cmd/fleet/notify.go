@@ -27,11 +27,22 @@ type DesktopStatus struct {
 	SpacesCount   int                `json:"spaces_count"`
 	WorkingCount  int                `json:"working_count"`
 	ReviewCount   int                `json:"review_count"`
-	QueuedCount   int                `json:"queued_count"`
-	TotalSpendUSD float64            `json:"total_spend_usd"`
-	Spaces        []DesktopSpaceInfo `json:"spaces"`
-	Tasks         []DesktopTaskInfo  `json:"tasks"`
-	LastUpdated   time.Time          `json:"last_updated"`
+	QueuedCount   int                   `json:"queued_count"`
+	TotalSpendUSD float64               `json:"total_spend_usd,omitempty"`
+	Spaces        []DesktopSpaceInfo    `json:"spaces"`
+	Tasks         []DesktopTaskInfo     `json:"tasks"`
+	Schedules     []DesktopScheduleInfo `json:"schedules"`
+	LastUpdated   time.Time             `json:"last_updated"`
+}
+
+type DesktopScheduleInfo struct {
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	Schedule string `json:"schedule"`
+	Target   string `json:"target"`
+	NextRun  string `json:"next_run,omitempty"`
+	LastRun  string `json:"last_run,omitempty"`
+	Active   bool   `json:"active"`
 }
 
 type DesktopSpaceInfo struct {
@@ -255,6 +266,7 @@ func (n *desktopNotifier) refreshStatus(ctx context.Context) {
 		TotalSpendUSD: totalSpend,
 		Spaces:        dSpaces,
 		Tasks:         dTasks,
+		Schedules:     collectSchedules(),
 		LastUpdated:   time.Now().UTC(),
 	}
 
@@ -285,6 +297,67 @@ func (n *desktopNotifier) writeStatus(ds DesktopStatus) {
 	if err := os.WriteFile(tmp, data, 0600); err == nil {
 		_ = os.Rename(tmp, n.statusPath)
 	}
+}
+
+func collectSchedules() []DesktopScheduleInfo {
+	var scheds []DesktopScheduleInfo
+
+	configDir := os.Getenv("XDG_CONFIG_HOME")
+	if configDir == "" {
+		home, _ := os.UserHomeDir()
+		configDir = filepath.Join(home, ".config")
+	}
+	customPath := filepath.Join(configDir, "fleet", "schedules.json")
+	if data, err := os.ReadFile(customPath); err == nil {
+		var list []DesktopScheduleInfo
+		if err := json.Unmarshal(data, &list); err == nil {
+			scheds = append(scheds, list...)
+		}
+	}
+
+	cmd := exec.Command("systemctl", "--user", "list-timers", "--output=json")
+	out, err := cmd.Output()
+	if err == nil {
+		var rawTimers []struct {
+			Unit      string `json:"unit"`
+			Activates string `json:"activates"`
+			Next      *int64 `json:"next"`
+			Left      *int64 `json:"left"`
+			Last      *int64 `json:"last"`
+		}
+		if err := json.Unmarshal(out, &rawTimers); err == nil {
+			for _, rt := range rawTimers {
+				if strings.HasPrefix(rt.Unit, "fleet-") {
+					name := strings.TrimSuffix(rt.Unit, ".timer")
+					name = strings.ReplaceAll(name, "-", " ")
+
+					var nextStr, lastStr string
+					if rt.Next != nil && *rt.Next > 0 {
+						t := time.UnixMicro(*rt.Next).Local()
+						nextStr = t.Format("Mon 15:04")
+					} else {
+						nextStr = "inactive"
+					}
+					if rt.Last != nil && *rt.Last > 0 {
+						t := time.UnixMicro(*rt.Last).Local()
+						lastStr = t.Format("Mon 15:04")
+					}
+
+					scheds = append(scheds, DesktopScheduleInfo{
+						ID:       rt.Unit,
+						Name:     name,
+						Schedule: "Timer (" + rt.Unit + ")",
+						Target:   rt.Activates,
+						NextRun:  nextStr,
+						LastRun:  lastStr,
+						Active:   rt.Next != nil && *rt.Next > 0,
+					})
+				}
+			}
+		}
+	}
+
+	return scheds
 }
 
 func (n *desktopNotifier) handleEvent(ctx context.Context, ev schema.AgentEvent) {

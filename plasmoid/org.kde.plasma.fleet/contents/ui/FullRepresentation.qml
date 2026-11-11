@@ -15,7 +15,7 @@ PlasmaExtras.Representation {
     Layout.minimumWidth: Kirigami.Units.gridUnit * 22
     Layout.minimumHeight: Kirigami.Units.gridUnit * 18
     Layout.preferredWidth: Kirigami.Units.gridUnit * 24
-    Layout.preferredHeight: Kirigami.Units.gridUnit * 22
+    Layout.preferredHeight: Kirigami.Units.gridUnit * 24
 
     collapseMarginsHint: true
 
@@ -66,7 +66,7 @@ PlasmaExtras.Representation {
     contentItem: ColumnLayout {
         spacing: Kirigami.Units.smallSpacing
 
-        // Summary Bar: Spend & Active Workers
+        // Summary Bar: Focus on spaces, workers, reviews, and schedules (No spending)
         Rectangle {
             Layout.fillWidth: true
             Layout.preferredHeight: Kirigami.Units.gridUnit * 2.8
@@ -84,15 +84,15 @@ PlasmaExtras.Representation {
                 ColumnLayout {
                     spacing: 1
                     PlasmaComponents3.Label {
-                        text: "ACTIVE SPEND"
+                        text: "SPACES"
                         font.pixelSize: Kirigami.Theme.smallFont.pixelSize
                         color: Kirigami.Theme.disabledTextColor
                         font.bold: true
                     }
                     PlasmaComponents3.Label {
-                        text: "$" + (root.fleetStatus.total_spend_usd || 0).toFixed(2)
+                        text: (root.fleetStatus.spaces_count || 0) + " registered"
                         font.bold: true
-                        color: Kirigami.Theme.positiveTextColor
+                        color: Kirigami.Theme.textColor
                         font.pixelSize: Kirigami.Theme.defaultFont.pixelSize
                     }
                 }
@@ -138,6 +138,28 @@ PlasmaExtras.Representation {
                         text: (root.fleetStatus.review_count || 0) + " pending"
                         font.bold: true
                         color: (root.fleetStatus.review_count || 0) > 0 ? Kirigami.Theme.positiveTextColor : Kirigami.Theme.textColor
+                    }
+                }
+
+                Rectangle {
+                    Layout.fillHeight: true
+                    Layout.preferredWidth: 1
+                    color: Kirigami.Theme.disabledTextColor
+                    opacity: 0.3
+                }
+
+                ColumnLayout {
+                    spacing: 1
+                    PlasmaComponents3.Label {
+                        text: "SCHEDULES"
+                        font.pixelSize: Kirigami.Theme.smallFont.pixelSize
+                        color: Kirigami.Theme.disabledTextColor
+                        font.bold: true
+                    }
+                    PlasmaComponents3.Label {
+                        text: (root.fleetStatus.schedules ? root.fleetStatus.schedules.length : 0) + " active"
+                        font.bold: true
+                        color: Kirigami.Theme.textColor
                     }
                 }
             }
@@ -192,18 +214,18 @@ PlasmaExtras.Representation {
                         }
 
                         PlasmaComponents3.Label {
-                            text: "$" + (modelData.spend_usd || 0).toFixed(2) + " / " + (modelData.max_budget_usd > 0 ? "$" + modelData.max_budget_usd.toFixed(2) : "∞")
-                            font.family: "Monospace"
+                            text: (modelData.active_tasks || 0) + " tasks"
                             font.pixelSize: Kirigami.Theme.smallFont.pixelSize
+                            color: Kirigami.Theme.disabledTextColor
                         }
                     }
                 }
             }
         }
 
-        // Section Title: Tasks
+        // Section Title: Active Tasks
         PlasmaComponents3.Label {
-            text: "TASKS"
+            text: "ACTIVE TASKS"
             font.bold: true
             font.pixelSize: Kirigami.Theme.smallFont.pixelSize
             color: Kirigami.Theme.disabledTextColor
@@ -213,6 +235,7 @@ PlasmaExtras.Representation {
         // Tasks List
         PlasmaComponents3.ScrollView {
             Layout.fillWidth: true
+            Layout.preferredHeight: Kirigami.Units.gridUnit * 6
             Layout.fillHeight: true
 
             ListView {
@@ -283,12 +306,6 @@ PlasmaExtras.Representation {
                                 req.send();
                             }
                         }
-
-                        PlasmaComponents3.Label {
-                            text: "$" + (modelData.spend_usd || 0).toFixed(2)
-                            font.family: "Monospace"
-                            font.bold: true
-                        }
                     }
                 }
 
@@ -301,19 +318,91 @@ PlasmaExtras.Representation {
             }
         }
 
-        // Footer: Quick Actions
-        RowLayout {
-            Layout.fillWidth: true
-            spacing: Kirigami.Units.smallSpacing
+        // Section Title: Scheduled Routines (Visualizer)
+        PlasmaComponents3.Label {
+            text: "SCHEDULED ROUTINES"
+            font.bold: true
+            font.pixelSize: Kirigami.Theme.smallFont.pixelSize
+            color: Kirigami.Theme.disabledTextColor
+            Layout.topMargin: Kirigami.Units.smallSpacing
+        }
 
-            PlasmaComponents3.Button {
-                Layout.fillWidth: true
-                text: "Open Fleet Cockpit (Kitty)"
-                icon.name: "utilities-terminal"
-                onClicked: {
-                    var req = new XMLHttpRequest();
-                    req.open("POST", "http://127.0.0.1:2978/action?type=terminal");
-                    req.send();
+        // Scheduled Routines List
+        PlasmaComponents3.ScrollView {
+            Layout.fillWidth: true
+            Layout.preferredHeight: Kirigami.Units.gridUnit * 5
+
+            ListView {
+                id: scheduleListView
+                model: root.fleetStatus.schedules || []
+                clip: true
+                spacing: Kirigami.Units.smallSpacing
+
+                delegate: Rectangle {
+                    required property var modelData
+                    width: scheduleListView.width
+                    height: Kirigami.Units.gridUnit * 2.8
+                    color: Kirigami.Theme.alternateBackgroundColor
+                    radius: Kirigami.Units.smallSpacing
+                    border.color: modelData.active ? Kirigami.Theme.highlightColor : Kirigami.Theme.disabledTextColor
+                    border.width: 1
+                    opacity: modelData.active ? 1.0 : 0.6
+
+                    RowLayout {
+                        anchors.fill: parent
+                        anchors.margins: Kirigami.Units.smallSpacing
+                        spacing: Kirigami.Units.smallSpacing
+
+                        Kirigami.Icon {
+                            source: modelData.active ? "chronometer" : "alarm-symbolic"
+                            Layout.preferredWidth: Kirigami.Units.iconSizes.small
+                            Layout.preferredHeight: Layout.preferredWidth
+                        }
+
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            spacing: 1
+
+                            RowLayout {
+                                spacing: Kirigami.Units.smallSpacing
+                                PlasmaComponents3.Label {
+                                    text: modelData.name
+                                    font.bold: true
+                                    font.pixelSize: Kirigami.Theme.defaultFont.pixelSize
+                                }
+                                Rectangle {
+                                    Layout.preferredHeight: Kirigami.Units.gridUnit * 0.9
+                                    Layout.preferredWidth: schedTag.implicitWidth + 6
+                                    radius: 2
+                                    color: modelData.active ? Kirigami.Theme.positiveBackgroundColor : Kirigami.Theme.backgroundColor
+
+                                    PlasmaComponents3.Label {
+                                        id: schedTag
+                                        anchors.centerIn: parent
+                                        text: modelData.active ? "SCHEDULED" : "INACTIVE"
+                                        font.bold: true
+                                        font.pixelSize: Kirigami.Theme.smallFont.pixelSize - 1
+                                        color: modelData.active ? Kirigami.Theme.positiveTextColor : Kirigami.Theme.disabledTextColor
+                                    }
+                                }
+                            }
+
+                            PlasmaComponents3.Label {
+                                text: "Runs: " + modelData.target + (modelData.next_run ? " • Next: " + modelData.next_run : "")
+                                font.pixelSize: Kirigami.Theme.smallFont.pixelSize
+                                color: Kirigami.Theme.disabledTextColor
+                                elide: Text.ElideRight
+                                Layout.fillWidth: true
+                            }
+                        }
+                    }
+                }
+
+                PlasmaExtras.PlaceholderMessage {
+                    anchors.centerIn: parent
+                    visible: scheduleListView.count === 0
+                    iconName: "chronometer"
+                    text: "No scheduled routines configured"
                 }
             }
         }
